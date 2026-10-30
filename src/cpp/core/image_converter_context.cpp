@@ -13,9 +13,11 @@
 void ImageConverterContext::init() {
     // Register codecs for SkCodec::MakeFromData
     SkCodecs::Register(SkPngDecoder::Decoder());
+#ifndef HTML_TO_IMAGE_PDF_ONLY
     SkCodecs::Register(SkJpegDecoder::Decoder());
     SkCodecs::Register(SkWebpDecoder::Decoder());
     SkCodecs::Register(SkGifDecoder::Decoder());
     SkCodecs::Register(SkAvifDecoder::Decoder());
     SkCodecs::Register(SkBmpDecoder::Decoder());
+#endif
 }

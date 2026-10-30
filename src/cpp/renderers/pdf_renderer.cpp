@@ -28,7 +28,12 @@
 
 namespace {
 std::unique_ptr<SkCodec> PdfJpegDecoder(sk_sp<const SkData> data) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    // JPEG はそのまま埋め込まず、Flate で入れる
+    return nullptr;
+#else
     return SkJpegDecoder::Decode(std::move(data), nullptr, nullptr);
+#endif
 }
 
 bool PdfJpegEncoder(SkWStream* dst, const SkPixmap& src, int quality) {

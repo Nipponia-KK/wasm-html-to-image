@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "api/js_logger.h"
+#ifndef HTML_TO_IMAGE_PDF_ONLY
 #include "common/pdf_cmyk.h"
+#endif
 #include "common/string_utils.h"
 #include "core/container_skia.h"
 #include "core/master_css.h"
@@ -24,9 +26,13 @@
 #include "renderers/pdf_renderer.h"
 #include "renderers/png_renderer.h"
 #include "renderers/svg_renderer.h"
+#ifndef HTML_TO_IMAGE_PDF_ONLY
 #include "renderers/webp_renderer.h"
+#endif
 #include "utils/logging.h"
+#ifndef HTML_TO_IMAGE_PDF_ONLY
 #include "utils/pdf_merger.h"
+#endif
 
 // --- Global Logger (for legacy SATORU_LOG_* macros) ---
 static satoru::JsLogger g_js_logger;
@@ -75,7 +81,11 @@ typedef sk_sp<SkData> SkDataPtr;
 // A file that cannot be converted is an error (null), never a silent RGB result.
 sk_sp<SkData> to_requested_color_space(sk_sp<SkData> pdf, const SatoruRenderOptions& options) {
     if (!pdf || options.colorSpace != 1) return pdf;
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    return nullptr;
+#else
     return html_to_image::pdf_to_cmyk(*pdf);
+#endif
 }
 
 template <typename F>
@@ -679,9 +689,13 @@ const uint8_t* satoru_api_html_to_webp(SatoruInstance* inst, const char* html, i
     return render_and_store(
         inst,
         [&]() {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+            return sk_sp<SkData>();
+#else
             return renderHtmlToWebp(html, width, height, inst->context,
                                     inst->get_full_master_css().c_str(),
                                     inst->context.getExtraCss().c_str(), options);
+#endif
         },
         &SatoruContext::set_last_webp, out_size);
 }

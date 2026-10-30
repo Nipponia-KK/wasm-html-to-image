@@ -56,7 +56,12 @@ set(HTML_TO_IMAGE_LIBS
     JPEG::JPEG
     ZLIB::ZLIB
 )
-if(WASM_AVIF_BACKEND STREQUAL "DAV1D")
+if(WASM_PDF_ONLY)
+    list(REMOVE_ITEM HTML_TO_IMAGE_LIBS
+        WebP::webp WebP::webpdecoder WebP::webpdemux WebP::libwebpmux WebP::sharpyuv
+        avif unofficial::brotli::brotlienc qpdf::libqpdf JPEG::JPEG
+    )
+elseif(WASM_AVIF_BACKEND STREQUAL "DAV1D")
     list(APPEND HTML_TO_IMAGE_LIBS dav1d::dav1d)
 else()
     list(APPEND HTML_TO_IMAGE_LIBS aom)

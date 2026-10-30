@@ -31,6 +31,12 @@ option(WASM_ENABLE_PDF "Enable Skia PDF document support" ON)
 option(WASM_ENABLE_SKSL "Enable Skia SkSL sources" OFF)
 # JXL: ON既定 (libjxl FetchContentで取得。JPEG XL encode/decode用)
 option(WASM_ENABLE_JXL "Enable JPEG XL" ON)
+# PDF_ONLY: HTML -> PDF だけを残す。画像エンコーダ (WebP/AVIF/JPEG/GIF/APNG/TIFF/ThumbHash/JXL)、
+# PNG 以外の画像デコーダ、qpdf (PDF 結合)、CMYK を外す。JS 側の API はそのままで、外した形式を指定すると空の結果になる
+option(WASM_PDF_ONLY "Build only the HTML to PDF path" OFF)
+if(WASM_PDF_ONLY)
+    set(WASM_ENABLE_JXL OFF CACHE BOOL "" FORCE)
+endif()
 
 # --- Enable ccache ---
 find_program(CCACHE_PROGRAM ccache)
@@ -134,6 +140,21 @@ target_include_directories(html_to_image_core PRIVATE
 target_link_libraries(html_to_image_core PUBLIC litehtml skia_lib)
 target_compile_options(html_to_image_core PRIVATE ${COMMON_COMPILE_OPTIONS})
 target_compile_definitions(html_to_image_core PRIVATE SK_USER_CONFIG_HEADER="SkUserConfig.h")
+if(WASM_PDF_ONLY)
+    target_compile_definitions(html_to_image_core PRIVATE HTML_TO_IMAGE_PDF_ONLY)
+    get_target_property(_core_srcs html_to_image_core SOURCES)
+    list(REMOVE_ITEM _core_srcs
+        src/cpp/common/webp_anim_encoder.cpp
+        src/cpp/common/apng_encoder.cpp
+        src/cpp/common/gif_encoder.cpp
+        src/cpp/common/tiff_encoder.cpp
+        src/cpp/common/thumbhash.cpp
+        src/cpp/common/pdf_cmyk.cpp
+        src/cpp/utils/pdf_merger.cpp
+        src/cpp/renderers/webp_renderer.cpp
+    )
+    set_property(TARGET html_to_image_core PROPERTY SOURCES ${_core_srcs})
+endif()
 if(WASM_ENABLE_JXL)
     target_compile_definitions(html_to_image_core PRIVATE JXL_ENABLED)
     # lib/jxl.cmake 公開ターゲット: `jxl` 優先、なければ `jxl_enc`

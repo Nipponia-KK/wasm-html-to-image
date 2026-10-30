@@ -173,6 +173,9 @@ if(WASM_ENABLE_SKSL)
     list(FILTER SKIA_CORE_SRC EXCLUDE REGEX ".*_win.cpp|.*_mac.cpp|.*_linux.cpp|.*_android.cpp|.*_ios.cpp")
 endif()
 
+if(WASM_PDF_ONLY)
+    list(FILTER SKIA_CORE_SRC EXCLUDE REGEX ".*/src/codec/Sk(Jpeg|Webp|Avif|Wuffs|Bmp|Ico)[A-Za-z]*\\.cpp|.*wuffs_implementation\\.cpp|.*/src/encode/Sk(Jpeg|JPEG|Webp)[A-Za-z]*\\.cpp")
+endif()
 target_sources(skia_lib PRIVATE ${SKIA_CORE_SRC})
 target_include_directories(skia_lib PUBLIC
     "${SKIA_CONFIG_DIR}"
@@ -186,6 +189,9 @@ target_include_directories(skia_lib PUBLIC
 set(SKIA_UNIFIED_DEFS SK_USER_CONFIG_HEADER="SkUserConfig.h" SK_ENABLE_SVG SK_DISABLE_FILESYSTEM SKCMS_PORTABLE)
 if(WASM_ENABLE_TEXT_SHAPING)
     list(APPEND SKIA_UNIFIED_DEFS SK_SHAPER_HARFBUZZ_AVAILABLE SK_SHAPER_UNICODE_AVAILABLE)
+endif()
+if(WASM_PDF_ONLY)
+    list(APPEND SKIA_UNIFIED_DEFS HTML_TO_IMAGE_PDF_ONLY)
 endif()
 target_compile_definitions(skia_lib PUBLIC ${SKIA_UNIFIED_DEFS})
 target_compile_options(skia_lib PRIVATE ${COMMON_COMPILE_OPTIONS} -w)

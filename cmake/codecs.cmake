@@ -30,6 +30,7 @@ if(NOT TARGET dav1d::dav1d)
     )
 endif()
 
+if(NOT WASM_PDF_ONLY)
 if(WASM_AVIF_BACKEND STREQUAL "AOM")
     # image-opt派生: libaom FetchContent (OPT-INのみ。既定DAV1Dでは取得しない)
     find_package(Perl REQUIRED)
@@ -95,6 +96,8 @@ if(WASM_AVIF_BACKEND STREQUAL "AOM" AND TARGET avif_obj)
         ${libaom_BINARY_DIR}
         ${libaom_SOURCE_DIR}/aom
     )
+endif()
+
 endif()
 
 # --- JXL (libjxl FetchContent) ---

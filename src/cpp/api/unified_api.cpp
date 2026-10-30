@@ -50,7 +50,12 @@ sk_sp<SkData> encode_image_to_pdf(const SkBitmap& bitmap) {
     // SkPDF は jpegDecoder/jpegEncoder の両方必須 (未設定は fatal)。
     // pdf_renderer.cpp の PdfJpegDecoder/PdfJpegEncoder と等価。
     metadata.jpegDecoder = [](sk_sp<const SkData> data) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+        // JPEG はそのまま埋め込まず、Flate で入れる
+        return std::unique_ptr<SkCodec>();
+#else
         return SkJpegDecoder::Decode(std::move(data), nullptr, nullptr);
+#endif
     };
     metadata.jpegEncoder = [](SkWStream* dst, const SkPixmap& src, int quality) {
         auto encoded = encode_jpeg(src, quality);

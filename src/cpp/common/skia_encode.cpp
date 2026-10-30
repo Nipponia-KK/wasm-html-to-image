@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cstring>
+#ifdef JXL_ENABLED
 #include <jxl/encode.h>
+#endif
 #include <zlib.h>
 
 #include <vector>
@@ -13,7 +15,9 @@
 #include "gif_encoder.h"
 #include "tiff_encoder.h"
 #include "webp_anim_encoder.h"
+#ifndef HTML_TO_IMAGE_PDF_ONLY
 #include "avif/avif.h"
+#endif
 #include "include/core/SkStream.h"
 #include "include/encode/SkJpegEncoder.h"
 #include "include/encode/SkPngEncoder.h"
@@ -296,6 +300,9 @@ std::string encode_png_data_url(const SkBitmap& bitmap) {
 }
 
 sk_sp<SkData> encode_webp_single(const SkPixmap& pixmap, float quality) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    return nullptr;
+#else
     SkDynamicMemoryWStream stream;
     SkWebpEncoder::Options options;
     options.fQuality = (int)quality;
@@ -306,17 +313,25 @@ sk_sp<SkData> encode_webp_single(const SkPixmap& pixmap, float quality) {
     }
     if (!SkWebpEncoder::Encode(&stream, pixmap, options)) return nullptr;
     return stream.detachAsData();
+#endif
 }
 
 sk_sp<SkData> encode_jpeg(const SkPixmap& pixmap, int quality) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    return nullptr;
+#else
     SkDynamicMemoryWStream stream;
     SkJpegEncoder::Options options;
     options.fQuality = quality;
     if (!SkJpegEncoder::Encode(&stream, pixmap, options)) return nullptr;
     return stream.detachAsData();
+#endif
 }
 
 sk_sp<SkData> encode_avif(const SkBitmap& bitmap, int quality, int speed) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    return nullptr;
+#else
     SkDynamicMemoryWStream stream;
     avifRWData output = AVIF_DATA_EMPTY;
     avifImage* avif_image =
@@ -351,12 +366,14 @@ sk_sp<SkData> encode_avif(const SkBitmap& bitmap, int quality, int speed) {
     avifEncoderDestroy(encoder);
     avifImageDestroy(avif_image);
     return result;
+#endif
 }
 
 sk_sp<SkData> encode_raw(const SkBitmap& bitmap) {
     return SkData::MakeWithCopy(bitmap.getPixels(), bitmap.computeByteSize());
 }
 
+#ifdef JXL_ENABLED
 std::vector<uint8_t> encode_jxl(const SkBitmap& bitmap, int quality, int speed) {
     const int width = bitmap.width();
     const int height = bitmap.height();
@@ -452,11 +469,16 @@ std::vector<uint8_t> encode_jxl(const SkBitmap& bitmap, int quality, int speed) 
     JxlEncoderDestroy(enc);
     return output;
 }
+#endif
 
 sk_sp<SkData> encode_thumbhash(const SkBitmap& bitmap) {
+#ifdef HTML_TO_IMAGE_PDF_ONLY
+    return nullptr;
+#else
     std::vector<uint8_t> hash =
         rgbaToThumbHash(bitmap.width(), bitmap.height(), (const uint8_t*)bitmap.getPixels());
     return SkData::MakeWithCopy(hash.data(), hash.size());
+#endif
 }
 
 EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
@@ -484,6 +506,7 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
         }
         case RenderFormat::WebP: {
             out.format_name = "webp";
+#ifndef HTML_TO_IMAGE_PDF_ONLY
             if (options.animation && count > 1) {
                 // libwebp `WebPAnimEncoder` 直呼び (loop_count / bgcolor 指定可)。
                 // loop_count=0・bgcolor=白 の既定値は Skia `EncodeAnimated` と
@@ -510,10 +533,12 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
                 }
                 return out;
             }
+#endif
             out.data = encode_webp_single(first.pixmap(), options.quality);
             return out;
         }
         case RenderFormat::APNG: {
+#ifndef HTML_TO_IMAGE_PDF_ONLY
             // Animated PNG when several frames are requested; a single frame is a plain PNG.
             if (options.animation && count > 1) {
                 std::vector<ApngFrame> anim_frames;
@@ -527,10 +552,12 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
                 out.is_animation = out.data != nullptr;
                 return out;
             }
+#endif
             out.format_name = "png";
             out.data = encode_png(first.pixmap());
             return out;
         }
+#ifndef HTML_TO_IMAGE_PDF_ONLY
         case RenderFormat::GIF: {
             out.format_name = "gif";
             const size_t n = (options.animation && count > 1) ? count : 1;
@@ -554,6 +581,7 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
                                    options.animation_bgcolor, options.dpi);
             return out;
         }
+#endif
         case RenderFormat::JPEG: {
             out.format_name = "jpeg";
             out.data = encode_jpeg(first.pixmap(), (int)options.quality);
@@ -570,6 +598,7 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
             out.data = encode_avif(first, (int)options.quality, options.speed);
             return out;
         }
+#ifdef JXL_ENABLED
         case RenderFormat::JXL: {
             out.format_name = "jxl";
             // 単帧のみ (animation無視)。
@@ -580,6 +609,7 @@ EncodeResult encode_frames(const EncodeFrameView* frames, size_t count,
             }
             return out;
         }
+#endif
         case RenderFormat::PDF: {
             out.format_name = "pdf";
             // dispatcherでは未対応のまま (画像→PDFは converter_encode_pdf 経由。

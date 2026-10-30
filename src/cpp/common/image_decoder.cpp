@@ -1,7 +1,9 @@
 #include "image_decoder.h"
 
+#ifdef JXL_ENABLED
 #include <jxl/encode.h>
 #include <jxl/decode.h>
+#endif
 
 #include <memory>
 #include <utility>
@@ -103,12 +105,14 @@ DecodeResult ImageDecoder::decode(const uint8_t* data, size_t size, sk_sp<SkFont
         result.animated = false;
     }
 
+#ifdef JXL_ENABLED
     // 1b. JPEG XL (Skia has no JXL codec): decode with libjxl.
     const JxlSignature sig = JxlSignatureCheck(data, size);
     if ((sig == JXL_SIG_CODESTREAM || sig == JXL_SIG_CONTAINER) && decode_jxl(data, size, result)) {
         return result;
     }
 
+#endif
     // 2. SVG (satoru側 decode_svg を統合。事前に共通 patch_svg_data を適用)。
     //    判定ヒューリスティックは satoru側 (先頭空白スキップ + '<') を採用。
     //    converter側は data[0] == '<' の直接比較 + api_load_image 側で事前パッチのため、
@@ -150,6 +154,7 @@ bool ImageDecoder::is_likely_svg(const uint8_t* data, size_t size) {
     return s >= 1 && p[0] == '<';
 }
 
+#ifdef JXL_ENABLED
 // JPEG XL (still or animated) -> N32 premul frames, converted to sRGB, orientation applied.
 bool ImageDecoder::decode_jxl(const uint8_t* data, size_t size, DecodeResult& result) {
     JxlDecoder* dec = JxlDecoderCreate(nullptr);
@@ -228,6 +233,7 @@ bool ImageDecoder::decode_jxl(const uint8_t* data, size_t size, DecodeResult& re
     result.animated = result.frames.size() > 1;
     return true;
 }
+#endif
 
 DecodeResult ImageDecoder::decode_svg(const sk_sp<SkData>& data, sk_sp<SkFontMgr> font_mgr,
                                       bool default_object_raster) {

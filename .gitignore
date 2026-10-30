@@ -86,3 +86,6 @@ tmp/
 # Cloudflare
 .wrangler
 .cloudflare/
+
+# ===== PDF-only publish directory (packages/html-to-image/scripts/pack-pdf.mjs) =====
+publish-pdf/

@@ -564,6 +564,15 @@ const thumbhash = await render({
 
 ---
 
+## 🤖 Agent Skill
+
+`skills/html-to-image` teaches AI coding agents (Claude Code and others) to use the CLI for HTML / Markdown / Mermaid / image conversion and PDF creation.
+
+```bash
+# Claude Code: copy the skill into your project or user skills
+cp -r skills/html-to-image ~/.claude/skills/
+```
+
 ## 📖 Documentation & Examples
 
 👉 **[Read the Official Documentation](https://sorakumo001.github.io/wasm-html-to-image/master/docs/)**  

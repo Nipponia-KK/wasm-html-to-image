@@ -336,24 +336,27 @@
       case "caption": return "table-caption";
       case "col": return "table-column";
       case "colgroup": return "table-column-group";
-      case "img": case "input": case "select": case "button": case "textarea": case "video": case "canvas": case "audio": case "iframe": case "object": return "inline-block";
+      case "input": case "select": case "button": case "audio": case "object": return "inline-block";
+      case "option": case "optgroup": return "block";
+      case "ruby": return "ruby";
+      case "rt": return "ruby-text";
       default: return "inline";
     }
   };
+  var BIDI = "address blockquote center div figure figcaption footer form header hr legend listing main p plaintext pre summary xmp article aside hgroup nav search section table caption colgroup col thead tbody tfoot tr td th dir dd dl dt menu ol ul li bdi output".split(" ");
   var uaStyle = function (el) {
     var t = el.localName, o = { display: uaDisplay(el) };
-    if (t === "b" || t === "strong" || t === "th" || /^h[1-6]$/.test(t)) o["font-weight"] = "bold";
+    if (t === "b" || t === "strong" || t === "th" || t === "optgroup" || /^h[1-6]$/.test(t)) o["font-weight"] = "700";
     if (/^h[1-6]$/.test(t)) o["font-size"] = ["2em", "1.5em", "1.17em", "1em", "0.83em", "0.67em"][+t.charAt(1) - 1];
     if (t === "i" || t === "em" || t === "cite" || t === "var" || t === "dfn" || t === "address") o["font-style"] = "italic";
     if ((t === "a" && el.hasAttribute("href")) || t === "u" || t === "ins") o["text-decoration-line"] = "underline";
     if (t === "s" || t === "strike" || t === "del") o["text-decoration-line"] = "line-through";
     if (t === "pre" || t === "code" || t === "kbd" || t === "samp" || t === "tt") o["font-family"] = "monospace";
     if (t === "pre") o["white-space"] = "pre";
-    if (t === "a" && el.hasAttribute("href")) o.color = "rgb(0, 0, 238)";
+    if (t === "a" && el.hasAttribute("href")) { o.color = "rgb(0, 0, 255)"; o.cursor = "pointer"; }
     if (t === "th") o["text-align"] = "center";
     if (t === "ul" || t === "ol" || t === "menu") o["list-style-type"] = t === "ol" ? "decimal" : "disc";
     if (t === "li") o["list-style-type"] = "inherit";
-    if (t === "button" || t === "input" || t === "select" || t === "textarea") o.cursor = "default";
     // jsdom 31's default sheet (margin-block / margin-inline / padding-inline-start of the flow, heading and list rules)
     var blockMargin = null;
     if (/^h[1-6]$/.test(t)) blockMargin = ["0.67em", "0.83em", "1em", "1.33em", "1.67em", "2.33em"][+t.charAt(1) - 1];
@@ -370,6 +373,36 @@
     if (t === "dd") o["margin-left"] = "40px";
     if (t === "dir" || t === "menu" || t === "ol" || t === "ul") o["padding-left"] = "40px";
     if (t === "td" || t === "th") { o["padding-top"] = "1px"; o["padding-right"] = "1px"; o["padding-bottom"] = "1px"; o["padding-left"] = "1px"; }
+    if (t === "big") o["font-size"] = "1.2em";
+    if (t === "small" || t === "sub" || t === "sup") o["font-size"] = "0.83333em";
+    if (t === "sub" || t === "sup") { o["vertical-align"] = t === "sub" ? "sub" : "super"; o["line-height"] = "normal"; }
+    if (t === "ruby" || t === "rt") o["unicode-bidi"] = "normal";
+    if (t === "li") o["text-align"] = "match-parent";
+    if (t === "button") { o["text-align"] = "center"; o["box-sizing"] = "border-box"; }
+    if (t === "select" || t === "table") o["box-sizing"] = "border-box";
+    if (t === "textarea") o["white-space"] = "pre-wrap";
+    if (t === "input") {
+      var it = (el.getAttribute("type") || "text").toLowerCase();
+      if (it !== "range" && it !== "checkbox" && it !== "radio") { o["overflow-x"] = "clip"; o["overflow-y"] = "clip"; }
+      if (it === "reset" || it === "button" || it === "submit") o["text-align"] = "center";
+      if (/^(radio|checkbox|reset|button|submit|color|search)$/.test(it)) o["box-sizing"] = "border-box";
+    }
+    var sides = ["top", "right", "bottom", "left"], k;
+    var border = function (width, style) { for (k = 0; k < 4; k++) { o["border-" + sides[k] + "-width"] = width; o["border-" + sides[k] + "-style"] = style; } };
+    if (t === "hr") {
+      o.color = "rgb(128, 128, 128)"; border("1px", "inset"); o["margin-top"] = "0.5em"; o["margin-bottom"] = "0.5em";
+      o["margin-left"] = "auto"; o["margin-right"] = "auto"; o["overflow-x"] = "hidden"; o["overflow-y"] = "hidden";
+    }
+    if (t === "fieldset") {
+      border("2px", "groove"); o["margin-left"] = "2px"; o["margin-right"] = "2px";
+      o["padding-top"] = "0.35em"; o["padding-bottom"] = "0.625em"; o["padding-left"] = "0.75em"; o["padding-right"] = "0.75em";
+    }
+    if (t === "legend") { o["padding-left"] = "2px"; o["padding-right"] = "2px"; }
+    if (t === "iframe") border("2px", "inset");
+    // unicode-bidi: the default sheet isolates blocks, lists, table parts, headings and anything with a dir attribute
+    if (o["unicode-bidi"] === undefined) {
+      o["unicode-bidi"] = t === "bdo" ? "isolate-override" : (BIDI.indexOf(t) >= 0 || /^h[1-6]$/.test(t) || el.hasAttribute("dir")) ? "isolate" : "normal";
+    }
     return o;
   };
   var INHERITED = "color cursor direction font font-family font-size font-style font-variant font-weight letter-spacing line-height list-style list-style-image list-style-position list-style-type pointer-events quotes text-align text-indent text-transform text-shadow visibility white-space word-spacing word-break overflow-wrap tab-size caret-color fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit".split(" ");
@@ -379,7 +412,7 @@
     "font-size": "16px", "font-weight": "400", "font-style": "normal", "font-family": "Times New Roman", "line-height": "normal", "letter-spacing": "normal",
     "text-align": "start", "text-decoration-line": "none", "text-transform": "none", "text-indent": "0px", "white-space": "normal", "word-spacing": "0px",
     "width": "auto", "height": "auto", "min-width": "auto", "min-height": "auto", "max-width": "none", "max-height": "none",
-    "top": "auto", "right": "auto", "bottom": "auto", "left": "auto", "box-sizing": "content-box", "direction": "ltr", "vertical-align": "baseline",
+    "top": "auto", "right": "auto", "bottom": "auto", "left": "auto", "box-sizing": "content-box", "unicode-bidi": "normal", "direction": "ltr", "vertical-align": "baseline",
     "margin-top": "0px", "margin-right": "0px", "margin-bottom": "0px", "margin-left": "0px", "padding-top": "0px", "padding-right": "0px", "padding-bottom": "0px", "padding-left": "0px",
     "border-top-width": "0px", "border-right-width": "0px", "border-bottom-width": "0px", "border-left-width": "0px",
     "border-top-style": "none", "border-right-style": "none", "border-bottom-style": "none", "border-left-style": "none",
@@ -505,7 +538,7 @@
     }
     return null;
   };
-  var fmtPx = function (x) { x = +x.toFixed(3); return (x === 0 ? 0 : x) + "px"; };
+  var fmtPx = function (x) { x = +x.toFixed(4); return (x === 0 ? 0 : x) + "px"; };
   // a math expression -> { v, px } or null (a percentage, an unknown unit or anything unparsed leaves the text as it was)
   var evalMath = function (s, fs, root) {
     var i = 0, bad = {};

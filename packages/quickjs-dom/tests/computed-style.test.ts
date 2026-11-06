@@ -57,6 +57,21 @@ describe("getComputedStyle", () => {
     }
   });
 
+  it("answers the UA defaults of every common element as jsdom does", () => {
+    const tags = "a abbr address article aside b bdi bdo big blockquote button canvas caption center cite code dd del dfn dir div dl dt em fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hr i iframe img input ins kbd label legend li main mark menu nav ol optgroup option output p pre q ruby rt s samp section select small span strong sub sup table tbody td textarea tfoot th thead tr u ul video".split(" ");
+    const props = ["display", "margin-top", "margin-right", "margin-bottom", "margin-left", "padding-top", "padding-right", "padding-bottom", "padding-left", "font-size", "font-weight", "font-style", "text-align", "text-decoration-line", "white-space", "list-style-type", "vertical-align", "color", "cursor", "line-height", "border-top-width", "border-top-style", "overflow-x", "box-sizing", "unicode-bidi"];
+    const html = "<body>" + tags.map((t) => (t === "a" ? '<a id="t_a" href="#">x</a>' : `<${t} id="t_${t}">x</${t}>`)).join("");
+    const ours = make(html).window;
+    const ref = new RealJSDOM(html).window;
+    const diffs: string[] = [];
+    for (const t of tags) {
+      const a = ref.getComputedStyle(ref.document.getElementById("t_" + t)!);
+      const b = ours.getComputedStyle(ours.document.getElementById("t_" + t)!);
+      for (const p of props) if (a.getPropertyValue(p) !== "" && a.getPropertyValue(p) !== b.getPropertyValue(p)) diffs.push(`${t} ${p}: jsdom ${a.getPropertyValue(p)}, ours ${b.getPropertyValue(p)}`);
+    }
+    expect(diffs).toEqual([]);
+  });
+
   it("importance, specificity, inline style and order", () => {
     const { window } = make(PAGE);
     expect(read(window, "#special", ["color"])).toEqual(["rgb(0, 128, 0)"]); // !important in a sheet beats the style attribute
@@ -84,7 +99,7 @@ describe("getComputedStyle", () => {
   it("the defaults of elements, hidden, and reads by camelCase name", () => {
     const { window } = make(PAGE);
     const cs = (id: string) => window.getComputedStyle(window.document.getElementById(id));
-    expect(cs("b").fontWeight).toBe("bold");
+    expect(cs("b").fontWeight).toBe("700");
     expect(cs("link").textDecorationLine).toBe("underline");
     expect(cs("li").display).toBe("list-item");
     expect(window.getComputedStyle(window.document.querySelector("p.shown")).display).toBe("none"); // the hidden attribute

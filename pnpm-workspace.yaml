@@ -1,6 +1,10 @@
 packages:
   - "packages/*"
   - "examples/*"
+overrides:
+  # parse5-parser-stream@8.1.0 declares parse5 ^8.0.0 but needs the 8.1.0 tokenizer (flushCharacters),
+  # which jsdom 31 calls. Without this, pnpm can resolve it to 8.0.1 and `new JSDOM()` throws.
+  "parse5-parser-stream>parse5": 8.1.0
 allowBuilds:
   '@parcel/watcher': true
   "@swc/core": true

@@ -354,6 +354,22 @@
     if (t === "ul" || t === "ol" || t === "menu") o["list-style-type"] = t === "ol" ? "decimal" : "disc";
     if (t === "li") o["list-style-type"] = "inherit";
     if (t === "button" || t === "input" || t === "select" || t === "textarea") o.cursor = "default";
+    // jsdom 31's default sheet (margin-block / margin-inline / padding-inline-start of the flow, heading and list rules)
+    var blockMargin = null;
+    if (/^h[1-6]$/.test(t)) blockMargin = ["0.67em", "0.83em", "1em", "1.33em", "1.67em", "2.33em"][+t.charAt(1) - 1];
+    else if (t === "blockquote" || t === "figure" || t === "listing" || t === "p" || t === "plaintext" || t === "pre" || t === "xmp") blockMargin = "1em";
+    else if (t === "dir" || t === "dl" || t === "menu" || t === "ol" || t === "ul") {
+      blockMargin = "1em";
+      for (var up = el.parentElement; up; up = up.parentElement) {
+        var ut = up.localName;
+        if (ut === "dir" || ut === "dl" || ut === "menu" || ut === "ol" || ut === "ul") { blockMargin = "0px"; break; }
+      }
+    }
+    if (blockMargin !== null) { o["margin-top"] = blockMargin; o["margin-bottom"] = blockMargin; }
+    if (t === "blockquote" || t === "figure") { o["margin-left"] = "40px"; o["margin-right"] = "40px"; }
+    if (t === "dd") o["margin-left"] = "40px";
+    if (t === "dir" || t === "menu" || t === "ol" || t === "ul") o["padding-left"] = "40px";
+    if (t === "td" || t === "th") { o["padding-top"] = "1px"; o["padding-right"] = "1px"; o["padding-bottom"] = "1px"; o["padding-left"] = "1px"; }
     return o;
   };
   var INHERITED = "color cursor direction font font-family font-size font-style font-variant font-weight letter-spacing line-height list-style list-style-image list-style-position list-style-type pointer-events quotes text-align text-indent text-transform text-shadow visibility white-space word-spacing word-break overflow-wrap tab-size caret-color fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit".split(" ");

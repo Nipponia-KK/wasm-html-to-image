@@ -74,9 +74,9 @@ export interface JSDOMOptions extends HappyDOMSettings {
    */
   storageQuota?: number;
   /**
-   * The page pretends to be visual: `requestAnimationFrame` exists, the document is `"visible"` and focused.
+   * The page pretends to be visual: `requestAnimationFrame` exists, the document is `"visible"`.
    * Without it (jsdom's default) there are no animation frames, `visibilityState` is `"prerender"` and
-   * `document.hasFocus()` is false.
+   * `document.hasFocus()` is true either way, as in jsdom 31.
    */
   pretendToBeVisual?: boolean;
   /** Run the page's jobs in a microtask of the host, not at the end of each call (what the test environments use). */

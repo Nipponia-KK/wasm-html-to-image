@@ -191,7 +191,7 @@ describe("javascript option, QuickJS engine: browser APIs that apps use", () => 
       },
       { settleMs: 50 },
     );
-    expect(out.html).toContain('data-r="/foo?y=2#h|v||w|loading>interactive>complete"');
+    expect(out.html).toContain('data-r="/foo?y=2#h|v||w|loading&gt;interactive&gt;complete"');
   });
 
   it("has crypto, customElements, MutationObserver and Image", async () => {

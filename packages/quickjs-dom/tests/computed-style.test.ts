@@ -63,7 +63,9 @@ describe("getComputedStyle", () => {
     expect(read(window, "p.note", ["color"])).toEqual(["rgb(255, 165, 0)"]); // .note p (0,2,0 -> 0,1,1) beats div p (0,0,2)
     expect(read(window, "#special", ["z-index"])).toEqual(["3"]); // from the style attribute
     expect(read(window, "#special", ["margin-top", "margin-right", "margin-bottom", "margin-left"])).toEqual(["1px", "2px", "1px", "2px"]);
-    expect(window.getComputedStyle(window.document.querySelector("p.note")).margin).toBe("0px");
+    // the UA sheet gives a paragraph a 1em block margin (jsdom 31); the shorthand is whatever jsdom answers
+    const refWindow = new RealJSDOM(PAGE).window;
+    expect(window.getComputedStyle(window.document.querySelector("p.note")).margin).toBe(refWindow.getComputedStyle(refWindow.document.querySelector("p.note")).margin);
   });
 
   it("inherits what is inherited, and not the rest", () => {
@@ -148,7 +150,7 @@ describe("adoptedStyleSheets", () => {
     expect(dom.serialize()).not.toContain("rgb(255, 0, 0)"); // and they are not serialized into the page
     sheet.replaceSync("p { color: green }"); // no DOM mutation: the cached cascade still has to see it
     expect(window.getComputedStyle(p).color).toBe("rgb(0, 128, 0)");
-    expect(window.getComputedStyle(p).marginTop).toBe("0px");
+    expect(window.getComputedStyle(p).marginTop).toBe("16px"); // the UA sheet's 1em of a paragraph
   });
 });
 
@@ -252,7 +254,7 @@ describe("<link rel=stylesheet>", () => {
       expect(dom.window.getComputedStyle(p).marginTop).toBe("3px");
       expect(dom.window.getComputedStyle(p).display).toBe("flex");
       const plain = make(html.replace("<link", "<link data-x"));
-      expect(plain.window.getComputedStyle(plain.window.document.getElementById("p")).marginTop).toBe("0px");
+      expect(plain.window.getComputedStyle(plain.window.document.getElementById("p")).marginTop).toBe("16px");
     } finally {
       server.close();
     }

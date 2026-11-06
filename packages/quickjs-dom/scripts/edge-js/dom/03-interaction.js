@@ -32,13 +32,11 @@
   };
   var activeOf = function (doc) { return focused && focused.isConnected && focused.ownerDocument === doc ? focused : doc.body; };
   getter(P.Document, "activeElement", function () { return activeOf(this); });
-  var FOCUSED_DOCS = new WeakSet();
   def(P.HTMLElement, "focus", function () {
     if (!focusable(this) || focused === this) return;
     var prev = focused && focused.isConnected ? focused : null;
     focused = this;
     setState(0, this);
-    if (this.ownerDocument) FOCUSED_DOCS.add(this.ownerDocument); // a document that has been focused stays focused (jsdom's answer after blur, too)
     if (prev) { prev.dispatchEvent(focusEvent("blur", false, this)); prev.dispatchEvent(focusEvent("focusout", true, this)); }
     this.dispatchEvent(focusEvent("focus", false, prev));
     this.dispatchEvent(focusEvent("focusin", true, prev));

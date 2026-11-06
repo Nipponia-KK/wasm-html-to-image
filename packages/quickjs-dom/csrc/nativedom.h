@@ -864,8 +864,8 @@ static void nd_escape(HBuf *b, const char *s, int len, int attr) {
         uint8_t ch = (uint8_t)s[i];
         if (ch == '&') hbuf_add(b, (const uint8_t *)"&amp;", 5);
         else if (attr && ch == '"') hbuf_add(b, (const uint8_t *)"&quot;", 6);
-        else if (!attr && ch == '<') hbuf_add(b, (const uint8_t *)"&lt;", 4);
-        else if (!attr && ch == '>') hbuf_add(b, (const uint8_t *)"&gt;", 4);
+        else if (ch == '<') hbuf_add(b, (const uint8_t *)"&lt;", 4);
+        else if (ch == '>') hbuf_add(b, (const uint8_t *)"&gt;", 4);
         else if (ch == 0xC2 && i + 1 < len && (uint8_t)s[i + 1] == 0xA0) {
             hbuf_add(b, (const uint8_t *)"&nbsp;", 6);
             i++;

@@ -789,7 +789,7 @@
   getter(P.Document, "hidden", function () { var v = this[DOCVIS]; return v ? v.hidden : true; });
   getter(P.Document, "visibilityState", function () { var v = this[DOCVIS]; return v ? v.state : "prerender"; });
   getter(P.Document, "currentScript", function () { return null; });
-  def(P.Document, "hasFocus", function () { return FOCUSED_DOCS.has(this); });
+  def(P.Document, "hasFocus", function () { return true; });
   getter(P.Document, "dir", function () { var r = this.documentElement; return r ? r.getAttribute("dir") || "" : ""; }, function (v) { var r = this.documentElement; if (r) r.setAttribute("dir", String(v)); });
   var DOCJARS = new WeakMap();
   getter(P.Document, "cookie", function () {

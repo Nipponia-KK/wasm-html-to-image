@@ -234,10 +234,10 @@ describe("JSDOM: pretendToBeVisual, error classification, charsets", () => {
     return [typeof w.requestAnimationFrame, typeof w.cancelAnimationFrame, w.document.visibilityState, w.document.hidden, w.document.hasFocus()];
   };
   it("is not visual unless asked, as in jsdom", () => {
-    expect(visual(make("<p>"))).toEqual(["undefined", "undefined", "prerender", true, false]);
-    expect(visual(make("<p>", { pretendToBeVisual: true }))).toEqual(["function", "function", "visible", false, false]);
-    expect(visual(new RealJSDOM("<p>") as unknown as JSDOM)).toEqual(["undefined", "undefined", "prerender", true, false]);
-    // a document that has been focused reports focus, in either engine, and keeps reporting it after a blur
+    expect(visual(make("<p>"))).toEqual(["undefined", "undefined", "prerender", true, true]);
+    expect(visual(make("<p>", { pretendToBeVisual: true }))).toEqual(["function", "function", "visible", false, true]);
+    expect(visual(new RealJSDOM("<p>") as unknown as JSDOM)).toEqual(["undefined", "undefined", "prerender", true, true]);
+    // jsdom 31 reports focus for every document, focused or not, and keeps reporting it after a blur
     const dom = make("<input id=i>", { pretendToBeVisual: true });
     dom.window.document.getElementById("i").focus();
     expect(dom.window.document.hasFocus()).toBe(true);

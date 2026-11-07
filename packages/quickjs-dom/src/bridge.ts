@@ -71,6 +71,8 @@ interface Cell {
   /** Lazy event property bundle received with a callback argument, valid for generation `evg` (`Bridge.treeGen`). */
   evb?: string;
   evg?: number;
+  /** the keys of the bundle read so far (put into `reads`): a newer bundle for the same event replaces them */
+  evk?: string[];
 }
 
 /** A handle as the guest sends it. */
@@ -1508,12 +1510,20 @@ export class Bridge {
       if (key === "firstElementChild" || key === "lastElementChild") return null;
       if (key === "childElementCount") return 0;
     }
-    if (cell.evg === this.treeGen && cell.evb !== undefined) {
-      this.unpackEventBundle(cell);
-    }
     const k = cell.id + "\u0001" + key;
     const style = key === "style" && cell.t === 1;
     const store = style ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : this.reads;
+    // the bundle of a callback's event argument comes first: it is newer than anything cached before the callback ran
+    // (eventPhase, currentTarget, defaultPrevented), and the page cannot have run code since (same tree generation)
+    if (cell.evb !== undefined && cell.evg === this.treeGen) {
+      const token = this.bundleToken(cell.evb, key);
+      if (token !== undefined) {
+        const value = this.decodeToken(token);
+        this.reads.set(k, value);
+        (cell.evk ??= []).push(key);
+        return value;
+      }
+    }
     if (store.has(k)) return store.get(k);
     const value = this.send("g" + cell.id + "\u0001" + key);
     if (store.size > 100000) store.clear();
@@ -1524,19 +1534,17 @@ export class Bridge {
     return value;
   }
 
-  private unpackEventBundle(cell: Cell): void {
-    const bundle = cell.evb;
-    cell.evb = undefined;
-    if (!bundle) return;
-    const prefix = cell.id + "\u0001";
-    const parts = bundle.split("\u0003");
-    for (let i = 0; i < parts.length; i++) {
-      const kv = parts[i];
-      const sep = kv.indexOf("\u0001");
-      if (sep > 0) {
-        this.reads.set(prefix + kv.slice(0, sep), this.decodeToken(kv.slice(sep + 1)));
-      }
+  /** The token of `key` in an event bundle ("key\u0001token" parts apart by \u0003), or undefined. Neither keys nor tokens hold a separator. */
+  private bundleToken(bundle: string, key: string): string | undefined {
+    let at: number;
+    if (bundle.startsWith(key) && bundle.charCodeAt(key.length) === 1) at = key.length + 1;
+    else {
+      const p = bundle.indexOf("\u0003" + key + "\u0001");
+      if (p < 0) return undefined;
+      at = p + key.length + 2;
     }
+    const end = bundle.indexOf("\u0003", at);
+    return end < 0 ? bundle.slice(at) : bundle.slice(at, end);
   }
 
   /** The items of a list of the page (Testing Library goes through each input's `labels`), until the page changes. */
@@ -2298,6 +2306,12 @@ export class Bridge {
         const obj = this.handleOf(t.slice(1, cut));
         const cell = (obj as any)?.[HANDLE] as Cell | undefined;
         if (cell) {
+          if (cell.evk) {
+            // the same event again (another listener, another phase): what the last bundle answered is out of date
+            const prefix = cell.id + "\u0001";
+            for (const key of cell.evk) this.reads.delete(prefix + key);
+            cell.evk = undefined;
+          }
           cell.evb = t.slice(cut + 1);
           cell.evg = this.treeGen;
         }

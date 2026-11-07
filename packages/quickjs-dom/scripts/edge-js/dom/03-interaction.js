@@ -95,7 +95,7 @@
     var inner = label.querySelector(LABELABLE);
     return inner && !(inner.localName === "input" && inner.getAttribute("type") === "hidden") ? inner : null;
   };
-  ["HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "HTMLButtonElement", "HTMLOutputElement"].forEach(function (name) {
+  ["HTMLInputElement", "HTMLSelectElement", "HTMLTextAreaElement", "HTMLButtonElement", "HTMLOutputElement", "HTMLMeterElement", "HTMLProgressElement"].forEach(function (name) {
     var LABELS = Symbol("labels");
     getter(P[name], "labels", function () {
       var el = this;

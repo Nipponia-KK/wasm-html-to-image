@@ -102,6 +102,7 @@ const STRUCT_KEYS = new Set([
 /** Properties the page keeps in its own stores rather than in the tree — a form control's current
  * value, checkedness and selection — which the C mutation version does not move when page code
  * writes them. Reads of them are cached apart and dropped at every callback, version or not. */
+const LABELABLE = new Set(["button", "input", "meter", "output", "progress", "select", "textarea"]);
 const VOLATILE_KEYS = new Set([
   "value", "checked", "selected", "indeterminate",
   "selectionStart", "selectionEnd", "selectionDirection", "scrollTop", "scrollLeft",
@@ -1535,6 +1536,8 @@ export class Bridge {
     // else the property does not exist. Answering it here is the same answer the page would give, without a call.
     if (key === "correspondingUseElement" && cell.t === 1 && cell.l !== "use") return undefined;
     if (key === "defaultView" && cell.t !== 9 && cell.t !== undefined) return undefined;
+    // only the labelable elements have `labels` (Testing Library asks every element of the page)
+    if (key === "labels" && cell.t === 1 && cell.l !== undefined && !LABELABLE.has(cell.l) && !cell.l.includes("-")) return undefined;
     if (key === "ownerDocument" && cell.t !== 9) {
       if (cell.odg === this.odGen && cell.od !== undefined) return cell.od;
       const value = this.send("g" + cell.id + "\u0001" + key);

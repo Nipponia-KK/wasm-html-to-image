@@ -257,7 +257,19 @@
       case "undefined": case "boolean": return true;
       case "number": return v === v && v !== Infinity && v !== -Infinity && !(v === 0 && 1 / v < 0);
       case "string": return v.indexOf(SEP) < 0 && v.indexOf("\u0002") < 0 && v.indexOf("\u0003") < 0;
-      case "object": return v === null || (v !== g && plainProtoName(v) !== null && !Array.isArray(v) && !(v instanceof Date));
+      case "object": {
+        // the global object is plain as the handle it already has: a callback the page calls
+        // without a receiver (a collection's forEach with no thisArg, a timer) runs with the
+        // window as its `this`, and rejecting it here put every such callback on the JSON path
+        if (v === null || v === g) return true;
+        // an object whose handle string is already on record needs no prototype walk to be
+        // plain: the token builder returns that string as it stands
+        var hid = v[HID];
+        if (hid !== undefined && byId[hid] === v && infos[hid] !== undefined) return true;
+        var bid = byObj.get(v);
+        if (bid !== undefined && infos[bid] !== undefined) return true;
+        return plainProtoName(v) !== null && !Array.isArray(v) && !(v instanceof Date);
+      }
       default: return false;
     }
   };
@@ -269,6 +281,7 @@
       case "string": return "s" + v;
       default: {
         if (v === null) return "N";
+        if (v === g) return "h" + idFor(g);
         var cls = plainProtoName(v);
         if (withEvent && g.Event && v instanceof g.Event) return eventToken(v, cls);
         return handleString(v, cls);

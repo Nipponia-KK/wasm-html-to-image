@@ -102,7 +102,38 @@ const STRUCT_KEYS = new Set([
 /** Properties the page keeps in its own stores rather than in the tree — a form control's current
  * value, checkedness and selection — which the C mutation version does not move when page code
  * writes them. Reads of them are cached apart and dropped at every callback, version or not. */
-const LABELABLE = new Set(["button", "input", "meter", "output", "progress", "select", "textarea"]);
+/**
+ * `el.matches(selector)` for a list of simple selectors (a tag, then attributes/classes/ids only) that the element's tag alone
+ * settles: true for a bare tag that is its own, false when no part names its tag. Anything else is undefined (ask the page).
+ * Only tags in lower case with no namespace: an HTML element's localName is lower case, so the comparison is exact.
+ */
+const SIMPLE_COMPOUND = /^([a-z][a-z0-9-]*)((?:\[[^\]\s"'\\]*\]|\.[\w-]+|#[\w-]+)*)$/;
+const tagParts = new Map<string, { tag: string; bare: boolean }[] | null>();
+function tagMatch(selector: string, local: string): boolean | undefined {
+  let parts = tagParts.get(selector);
+  if (parts === undefined) {
+    parts = [];
+    for (const raw of selector.split(",")) {
+      const m = SIMPLE_COMPOUND.exec(raw.trim());
+      if (!m) {
+        parts = null;
+        break;
+      }
+      parts.push({ tag: m[1], bare: m[2] === "" });
+    }
+    if (tagParts.size > 500) tagParts.clear();
+    tagParts.set(selector, parts);
+  }
+  if (parts === null) return undefined;
+  let named = false;
+  for (const p of parts) {
+    if (p.tag !== local) continue;
+    if (p.bare) return true;
+    named = true;
+  }
+  return named ? undefined : false;
+}
+const LABELABLE =new Set(["button", "input", "meter", "output", "progress", "select", "textarea"]);
 const VOLATILE_KEYS = new Set([
   "value", "checked", "selected", "indeterminate",
   "selectionStart", "selectionEnd", "selectionDirection", "scrollTop", "scrollLeft",
@@ -1987,6 +2018,10 @@ export class Bridge {
       const tree = TREE_CALLS.has(key);
       this.invalidate(tree, tree && this.sameDocument(cell, args));
       return value;
+    }
+    if (key === "matches" && cell.t === 1 && cell.l !== undefined && typeof args[0] === "string") {
+      const answer = tagMatch(args[0], cell.l);
+      if (answer !== undefined) return answer;
     }
     const k = cell.id + "\u0001" + key + "\u0001" + encoded;
     if (this.reads.has(k)) return this.reads.get(k);

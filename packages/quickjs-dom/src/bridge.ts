@@ -1894,7 +1894,31 @@ export class Bridge {
 
   /** Arguments that are all strings go as is (no JSON on either side); the rest as a JSON array. */
   private encodeArgs(args: unknown[]): string {
-    if (args.length === 0) return "";
+    const len = args.length;
+    if (len === 0) return "";
+    if (len === 1) {
+      const a0 = args[0];
+      if (typeof a0 === "string" && !a0.includes("\u0001") && !a0.includes("\u0002")) {
+        return "\u0003" + a0;
+      }
+      const tok = this.encodeToken(a0);
+      if (tok !== null) {
+        return (tok.charCodeAt(0) === 102 ? "\u0006" : "\u0004") + tok;
+      }
+    } else if (len === 2) {
+      const a0 = args[0];
+      const a1 = args[1];
+      if (
+        typeof a0 === "string" &&
+        typeof a1 === "string" &&
+        !a0.includes("\u0001") &&
+        !a0.includes("\u0002") &&
+        !a1.includes("\u0001") &&
+        !a1.includes("\u0002")
+      ) {
+        return "\u0003" + a0 + "\u0002" + a1;
+      }
+    }
     let strings = true;
     for (const a of args) {
       if (typeof a !== "string" || a.includes("\u0002") || a.includes("\u0001")) {

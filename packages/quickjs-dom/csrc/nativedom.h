@@ -41,7 +41,7 @@ static JSValue nd_unknown_proto = JS_UNDEFINED;
 /* prototypes of the elements with a class of their own (HTMLInputElement for input, ...), registered by nativedom.js */
 #define ND_TAG_HASH_SIZE 512
 #define ND_TAG_HASH_MASK (ND_TAG_HASH_SIZE - 1)
-static struct { char tag[16]; int len; JSValue proto; } nd_tag_protos[ND_TAG_HASH_SIZE];
+static struct { char tag[16]; int len; JSValue proto; char cls[36]; } nd_tag_protos[ND_TAG_HASH_SIZE];
 static int nd_ntag_protos;
 
 static inline uint32_t nd_tag_hash(const char *tag, int len) {

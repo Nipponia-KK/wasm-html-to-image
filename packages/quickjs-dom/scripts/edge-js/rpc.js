@@ -4,7 +4,7 @@
 (function (g) {
   var D = g.__native.dom;
   // handle table: arrays by id (a Map keyed by small integers is slow in QuickJS), ids of let-go objects are reused
-  var byId = [undefined], sent = [0], free = [], live = 0, byObj = new Map();
+  var byId = [undefined], sent = [0], free = [], liveBox = { v: 0 }, byObj = new Map();
   var HID = Symbol("hid"), PCLS = Symbol("pcls"), CCLS = Symbol("ccls");
   // id of a function of the host's -> the function that calls it from here. A plain object, not a Map: QuickJS hashes
   // the sequential integer ids of a Map badly (a set costs 2-4 us, ~20x an object's), and every new listener paid it.
@@ -105,7 +105,7 @@
         } else {
           byObj.set(v, id);
         }
-        byId[id] = v; sent[id] = 0; live++;
+        byId[id] = v; sent[id] = 0; liveBox.v++;
       }
     }
     sent[id]++;
@@ -151,7 +151,7 @@
     if (id === undefined) {
       id = free.length ? free.pop() : byId.length;
       try { v[HID] = id; } catch (e) { byObj.set(v, id); }
-      byId[id] = v; sent[id] = 0; live++;
+      byId[id] = v; sent[id] = 0; liveBox.v++;
     }
     sent[id]++;
     return (infos[id] = "h" + id + tailOf(v, cls));
@@ -579,11 +579,11 @@
         if (left > 0) { sent[id] = left; return; }
         if (o && typeof o === "object" && o[HID] === id) { try { o[HID] = undefined; } catch (err) { byObj.delete(o); } }
         else byObj.delete(o);
-        byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); live--;
+        byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); liveBox.v--;
       });
       return null;
     },
-    live: function () { return live; },
+    live: function () { return liveBox.v; },
     // of these objects, the ids of the nodes that are not in a document (the host may stop pinning their wrappers)
     detached: function (r) {
       return json(r[1].filter(function (id) {
@@ -613,6 +613,9 @@
 
   // for the fast path in C (qd_rpc): the handle table, how an object is answered, how an error is
   g.__byId = byId;
+  // the same bookkeeping reply() keeps, for the node answers qd_rpc makes in C: an answer made
+  // there must leave these tables exactly as handleString would have
+  g.__rpcTables = { byId: byId, sent: sent, free: free, infos: infos, hid: HID, liveBox: liveBox };
   g.__reply = reply;
   g.__rpcError = function (e) { return "x" + JSON.stringify(errorInfo(e)); };
 

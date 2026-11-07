@@ -38,6 +38,8 @@ static JSValue cached_reply_fn = JS_UNDEFINED;
 static JSValue cached_error_fn = JS_UNDEFINED;
 static JSValue cached_host_fn = JS_UNDEFINED;
 static JSValue cached_byid = JS_UNDEFINED;
+static JSValue cached_tables = JS_UNDEFINED;
+static JSAtom cached_hid_atom = 0;
 static JSContext *cached_ctx = NULL;
 
 static void reset_rpc_cache(void) {
@@ -47,12 +49,16 @@ static void reset_rpc_cache(void) {
         if (!JS_IsUndefined(cached_error_fn)) JS_FreeValue(cached_ctx, cached_error_fn);
         if (!JS_IsUndefined(cached_host_fn)) JS_FreeValue(cached_ctx, cached_host_fn);
         if (!JS_IsUndefined(cached_byid)) JS_FreeValue(cached_ctx, cached_byid);
+        if (!JS_IsUndefined(cached_tables)) JS_FreeValue(cached_ctx, cached_tables);
+        if (cached_hid_atom) JS_FreeAtom(cached_ctx, cached_hid_atom);
     }
     cached_rpc_fn = JS_UNDEFINED;
     cached_reply_fn = JS_UNDEFINED;
     cached_error_fn = JS_UNDEFINED;
     cached_host_fn = JS_UNDEFINED;
     cached_byid = JS_UNDEFINED;
+    cached_tables = JS_UNDEFINED;
+    cached_hid_atom = 0;
     cached_ctx = NULL;
 }
 
@@ -66,6 +72,12 @@ static void update_rpc_cache(void) {
         cached_reply_fn = JS_GetPropertyStr(ctx, global, "__reply");
         cached_error_fn = JS_GetPropertyStr(ctx, global, "__rpcError");
         cached_byid = JS_GetPropertyStr(ctx, global, "__byId");
+        cached_tables = JS_GetPropertyStr(ctx, global, "__rpcTables");
+        if (JS_IsObject(cached_tables)) {
+            JSValue hid = JS_GetPropertyStr(ctx, cached_tables, "hid");
+            if (JS_IsSymbol(hid)) cached_hid_atom = JS_ValueToAtom(ctx, hid);
+            JS_FreeValue(ctx, hid);
+        }
         JS_FreeValue(ctx, global);
     }
 }
@@ -452,6 +464,195 @@ static int rpc_slow(JSValueConst fn, const char *req, size_t len) {
     return 0;
 }
 
+/* A node answer made here instead of by __reply (rpc.js: handleString), for a result of the
+   fast path below. The identity the host builds its wrapper from — id, class, nodeType,
+   nodeName, localName — is read off the ND struct and the prototype the object actually
+   carries, and rpc.js's own tables (g.__rpcTables) are kept exactly as handleString keeps
+   them, so an answer made here is indistinguishable from one made there. Anything this side
+   cannot name with certainty — a prototype it did not register, a tag whose registration
+   carried no name — returns 0 and __reply answers as before. */
+static int rpc_answer_node(JSValueConst v, ND *n) {
+    if (!JS_IsObject(cached_tables) || !cached_hid_atom) return 0;
+    /* the class, from the prototype the object carries */
+    const char *cls = NULL;
+    JSValue proto = JS_GetPrototype(ctx, v);
+    if (JS_IsException(proto)) {
+        JS_FreeValue(ctx, proto);
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return 0;
+    }
+    if (n->type == 1) {
+        if (!JS_IsUndefined(nd_unknown_proto) && JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(nd_unknown_proto)) {
+            cls = "HTMLUnknownElement";
+        } else if (n->tag && n->taglen > 0 && n->taglen < 16) {
+            uint32_t h = nd_tag_hash(n->tag, n->taglen) & ND_TAG_HASH_MASK;
+            for (int step = 0; step < ND_TAG_HASH_SIZE; step++) {
+                uint32_t idx = (h + step) & ND_TAG_HASH_MASK;
+                if (nd_tag_protos[idx].len == 0) break;
+                if (nd_tag_protos[idx].len == n->taglen) {
+                    int same = 1;
+                    for (int k = 0; k < n->taglen; k++) {
+                        char a = nd_tag_protos[idx].tag[k], b = n->tag[k];
+                        if (a >= 'A' && a <= 'Z') a += 32;
+                        if (b >= 'A' && b <= 'Z') b += 32;
+                        if (a != b) { same = 0; break; }
+                    }
+                    if (same) {
+                        if (nd_tag_protos[idx].cls[0] && JS_VALUE_GET_PTR(nd_tag_protos[idx].proto) == JS_VALUE_GET_PTR(proto)) cls = nd_tag_protos[idx].cls;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!cls && JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(nd_protos[NP_ELEMENT])) cls = "HTMLElement";
+    } else {
+        int kind = n->type == 3 ? NP_TEXT : n->type == 8 ? NP_COMMENT : n->type == 9 ? NP_DOCUMENT : n->type == 10 ? NP_DOCTYPE : n->type == 11 ? NP_FRAGMENT : -1;
+        const char *kn = n->type == 3 ? "Text" : n->type == 8 ? "Comment" : n->type == 9 ? "Document" : n->type == 10 ? "DocumentType" : n->type == 11 ? "DocumentFragment" : NULL;
+        if (kn && kind >= 0 && JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(nd_protos[kind])) cls = kn;
+    }
+    JS_FreeValue(ctx, proto);
+    if (!cls) return 0;
+
+    JSValue sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
+    JSValue infos = JS_GetPropertyStr(ctx, cached_tables, "infos");
+    JSValue freeArr = JS_GetPropertyStr(ctx, cached_tables, "free");
+    JSValue liveBox = JS_GetPropertyStr(ctx, cached_tables, "liveBox");
+    int done = 0;
+    if (JS_IsArray(sent) != 1 || JS_IsArray(infos) != 1 || JS_IsArray(freeArr) != 1 || !JS_IsObject(liveBox)) goto out;
+    /* the id: the object's own HID, when byId still holds the object under it */
+    int64_t id = -1;
+    JSValue idv = JS_GetProperty(ctx, v, cached_hid_atom);
+    if (JS_IsException(idv)) {
+        JS_FreeValue(ctx, idv);
+        goto out;
+    }
+    if (JS_IsNumber(idv)) {
+        int64_t cand = 0;
+        JS_ToInt64(ctx, &cand, idv);
+        if (cand >= 0) {
+            JSValue cur = JS_GetPropertyUint32(ctx, cached_byid, (uint32_t)cand);
+            if (JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(v)) id = cand;
+            JS_FreeValue(ctx, cur);
+        }
+    }
+    JS_FreeValue(ctx, idv);
+    if (id < 0) {
+        int64_t flen = 0;
+        if (JS_GetLength(ctx, freeArr, &flen)) goto out;
+        if (flen > 0) {
+            JSValue fv = JS_GetPropertyUint32(ctx, freeArr, (uint32_t)(flen - 1));
+            if (!JS_IsNumber(fv)) {
+                JS_FreeValue(ctx, fv);
+                goto out;
+            }
+            JS_ToInt64(ctx, &id, fv);
+            JS_FreeValue(ctx, fv);
+            if (JS_SetLength(ctx, freeArr, flen - 1) < 0) goto out;
+        } else {
+            int64_t blen = 0;
+            if (JS_GetLength(ctx, cached_byid, &blen)) goto out;
+            id = blen;
+        }
+        if (JS_SetProperty(ctx, v, cached_hid_atom, JS_NewInt64(ctx, id)) < 0) goto out;
+        JS_SetPropertyUint32(ctx, cached_byid, (uint32_t)id, JS_DupValue(ctx, v));
+        JS_SetPropertyUint32(ctx, sent, (uint32_t)id, JS_NewInt32(ctx, 0));
+        JSValue lv = JS_GetPropertyStr(ctx, liveBox, "v");
+        int64_t lvn = 0;
+        JS_ToInt64(ctx, &lvn, lv);
+        JS_FreeValue(ctx, lv);
+        JS_SetPropertyStr(ctx, liveBox, "v", JS_NewInt64(ctx, lvn + 1));
+    }
+    { /* sent[id]++: the handle has been sent once more */
+        JSValue sv = JS_GetPropertyUint32(ctx, sent, (uint32_t)id);
+        int64_t s = 0;
+        JS_ToInt64(ctx, &s, sv);
+        JS_FreeValue(ctx, sv);
+        JS_SetPropertyUint32(ctx, sent, (uint32_t)id, JS_NewInt64(ctx, s + 1));
+    }
+    /* a recorded answer is reused as it stands */
+    JSValue info = JS_GetPropertyUint32(ctx, infos, (uint32_t)id);
+    if (JS_IsString(info)) {
+        set_result_value(info);
+        JS_FreeValue(ctx, info);
+        done = 1;
+        goto out;
+    }
+    JS_FreeValue(ctx, info);
+    /* the answer string, composed as handleString composes it: h<id>, the class, the node
+       type, the nodeName and, for an element, its localName and nodeName again */
+    char nn[600];
+    int nnlen;
+    if (n->type == 1) {
+        if (!n->tag || n->taglen >= (int)sizeof nn) goto out;
+        if (nd_attr_case_folded(n)) {
+            for (int i = 0; i < n->taglen; i++) {
+                char ch = n->tag[i];
+                nn[i] = ch >= 'a' && ch <= 'z' ? (char)(ch - 32) : ch;
+            }
+        } else {
+            memcpy(nn, n->tag, (size_t)n->taglen);
+        }
+        nnlen = n->taglen;
+    } else if (n->type == 10) {
+        if (!n->tag) goto out;
+        /* a doctype: the word after the DOCTYPE keyword in its data (js_nd_node_name) */
+        int i = 0;
+        while (i < n->taglen && !h_ws((uint8_t)n->tag[i])) i++;
+        while (i < n->taglen && h_ws((uint8_t)n->tag[i])) i++;
+        int st = i;
+        while (i < n->taglen && !h_ws((uint8_t)n->tag[i])) i++;
+        nnlen = i - st;
+        if (nnlen >= (int)sizeof nn) goto out;
+        memcpy(nn, n->tag + st, (size_t)nnlen);
+    } else {
+        const char *fixed = n->type == 3 ? "#text" : n->type == 8 ? "#comment" : n->type == 9 ? "#document" : "#document-fragment";
+        nnlen = (int)strlen(fixed);
+        memcpy(nn, fixed, (size_t)nnlen);
+    }
+    char buf[2000];
+    size_t pos = 0;
+    buf[pos++] = 'h';
+    char num[24];
+    int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
+    memcpy(buf + pos, num, (size_t)numlen);
+    pos += (size_t)numlen;
+    buf[pos++] = 1;
+    size_t clslen = strlen(cls);
+    memcpy(buf + pos, cls, clslen);
+    pos += clslen;
+    buf[pos++] = 1;
+    numlen = snprintf(num, sizeof num, "%d", n->type);
+    memcpy(buf + pos, num, (size_t)numlen);
+    pos += (size_t)numlen;
+    buf[pos++] = 1;
+    memcpy(buf + pos, nn, (size_t)nnlen);
+    pos += (size_t)nnlen;
+    if (n->type == 1) {
+        buf[pos++] = 1;
+        memcpy(buf + pos, n->tag, (size_t)n->taglen);
+        pos += (size_t)n->taglen;
+        buf[pos++] = 1;
+        memcpy(buf + pos, nn, (size_t)nnlen);
+        pos += (size_t)nnlen;
+    }
+    JSValue ans = JS_NewStringLen(ctx, buf, pos);
+    if (JS_IsException(ans)) {
+        JS_FreeValue(ctx, ans);
+        goto out;
+    }
+    JS_SetPropertyUint32(ctx, infos, (uint32_t)id, JS_DupValue(ctx, ans));
+    set_result_value(ans);
+    JS_FreeValue(ctx, ans);
+    done = 1;
+out:
+    if (!done) JS_FreeValue(ctx, JS_GetException(ctx)); /* a half-kept book is handleString's to repair */
+    JS_FreeValue(ctx, sent);
+    JS_FreeValue(ctx, infos);
+    JS_FreeValue(ctx, freeArr);
+    JS_FreeValue(ctx, liveBox);
+    return done;
+}
+
 /* the answer for value v (consumed): primitives here, an object through __reply */
 static int rpc_answer(JSValue v, JSValueConst reply_fn) {
     int tag = JS_VALUE_GET_TAG(v);
@@ -478,6 +679,13 @@ static int rpc_answer(JSValue v, JSValueConst reply_fn) {
     } else if (tag == JS_TAG_UNDEFINED) {
         rpc_set_prefixed('U', "", 0);
         return 0;
+    }
+    if (tag == JS_TAG_OBJECT) {
+        ND *nd = nd_of(v);
+        if (nd && rpc_answer_node(v, nd)) {
+            JS_FreeValue(ctx, v);
+            return 0;
+        }
     }
     JSValue out = JS_Call(ctx, reply_fn, JS_UNDEFINED, 1, &v);
     JS_FreeValue(ctx, v);

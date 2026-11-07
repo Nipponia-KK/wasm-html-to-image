@@ -836,6 +836,18 @@ static JSValue js_dom_set_tag_proto(JSContext *ctx, JSValueConst this_val, int a
         JS_FreeCString(ctx, tag);
         return JS_UNDEFINED;
     }
+    /* the interface's name, when the caller passes it (argv[2]): the answer path in qd_rpc
+       names a node from the prototype it carries, and this is the name that prototype has */
+    char cls[36];
+    cls[0] = 0;
+    if (argc > 2 && JS_IsString(argv[2])) {
+        size_t clen;
+        const char *cs = JS_ToCStringLen(ctx, &clen, argv[2]);
+        if (cs) {
+            if (clen < sizeof cls) memcpy(cls, cs, clen + 1);
+            JS_FreeCString(ctx, cs);
+        }
+    }
     if (len > 0 && len < 16 && nd_ntag_protos < ND_TAG_HASH_SIZE - 1) {
         uint32_t h = nd_tag_hash(tag, (int)len) & ND_TAG_HASH_MASK;
         for (int step = 0; step < ND_TAG_HASH_SIZE; step++) {
@@ -844,6 +856,7 @@ static JSValue js_dom_set_tag_proto(JSContext *ctx, JSValueConst this_val, int a
                 memcpy(nd_tag_protos[idx].tag, tag, len);
                 nd_tag_protos[idx].len = (int)len;
                 nd_tag_protos[idx].proto = JS_DupValue(ctx, argv[1]);
+                memcpy(nd_tag_protos[idx].cls, cls, sizeof cls);
                 nd_ntag_protos++;
                 break;
             }
@@ -858,6 +871,7 @@ static JSValue js_dom_set_tag_proto(JSContext *ctx, JSValueConst this_val, int a
                 if (same) {
                     JS_FreeValue(ctx, nd_tag_protos[idx].proto);
                     nd_tag_protos[idx].proto = JS_DupValue(ctx, argv[1]);
+                    memcpy(nd_tag_protos[idx].cls, cls, sizeof cls);
                     break;
                 }
             }

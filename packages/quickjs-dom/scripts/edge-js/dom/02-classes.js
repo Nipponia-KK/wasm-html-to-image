@@ -170,7 +170,7 @@
     // class so instanceof and the bridge see the same objects the window exposes
     D.ctors[name] = C;
     P[name] = C.prototype;
-    (PLAIN_TAGS[name] || []).forEach(function (tag) { D.setTagProto(tag, C.prototype); });
+    (PLAIN_TAGS[name] || []).forEach(function (tag) { D.setTagProto(tag, C.prototype, name); });
   });
 
   // ---- unknown elements, dialog, slot distribution -------------------------------------------
@@ -186,7 +186,7 @@
    "option output p param picture plaintext pre progress q rb rp rt rtc ruby s samp script search section select slot small source " +
    "spacer span strike strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track tt u ul " +
    "var video wbr xmp").split(" ").forEach(function (n) {
-    if (Object.getPrototypeOf(D.createDocument().createElement(n)) === P.HTMLElement) D.setTagProto(n, P.HTMLElement);
+    if (Object.getPrototypeOf(D.createDocument().createElement(n)) === P.HTMLElement) D.setTagProto(n, P.HTMLElement, "HTMLElement");
   });
   D.setTagProto("*", P.HTMLUnknownElement);
   var rawCreateElementNS = P.Document.createElementNS;

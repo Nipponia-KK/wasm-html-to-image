@@ -1325,7 +1325,7 @@
     Object.setPrototypeOf(C, D.ctors.HTMLElement);
     D.ctors[spec[0]] = C;
     P[spec[0]] = C.prototype;
-    for (var i = 1; i < spec.length; i++) D.setTagProto(spec[i], C.prototype);
+    for (var i = 1; i < spec.length; i++) D.setTagProto(spec[i], C.prototype, spec[0]);
   });
   // type: an input without a known one is a text field, a button without one submits
   var INPUT_TYPES = ["hidden", "text", "search", "tel", "url", "email", "password", "date", "month", "week", "time", "datetime-local", "number", "range", "color", "checkbox", "radio", "file", "submit", "image", "reset", "button"];
@@ -1562,7 +1562,7 @@
     Object.defineProperty(C, Symbol.hasInstance, { value: Function.prototype[Symbol.hasInstance], configurable: true }); // not the parent's
     D.ctors[name] = C;
     P[name] = C.prototype;
-    (tags || []).forEach(function (t) { D.setTagProto(t, C.prototype); });
+    (tags || []).forEach(function (t) { D.setTagProto(t, C.prototype, name); });
     return C;
   };
   var SVG_URI = "http://www.w3.org/2000/svg";

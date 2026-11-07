@@ -4,7 +4,7 @@
 (function (g) {
   var D = g.__native.dom;
   // handle table: arrays by id (a Map keyed by small integers is slow in QuickJS), ids of let-go objects are reused
-  var byId = [undefined], sent = [0], free = [], live = 0, byObj = new Map();
+  var byId = [undefined], sent = [0], free = [], liveBox = { v: 0 }, byObj = new Map();
   var HID = Symbol("hid"), PCLS = Symbol("pcls"), CCLS = Symbol("ccls");
   // id of a function of the host's -> the function that calls it from here. A plain object, not a Map: QuickJS hashes
   // the sequential integer ids of a Map badly (a set costs 2-4 us, ~20x an object's), and every new listener paid it.
@@ -105,7 +105,7 @@
         } else {
           byObj.set(v, id);
         }
-        byId[id] = v; sent[id] = 0; live++;
+        byId[id] = v; sent[id] = 0; liveBox.v++;
       }
     }
     sent[id]++;
@@ -115,11 +115,17 @@
   var SEP = "\u0001";
   // What follows the id in a handle string, by class and name: a page makes thousands of nodes of a few kinds.
   var infoTails = Object.create(null);
+  // The nodeName of a text, comment, document or fragment node is fixed by its type (the C
+  // getters answer exactly these), so it need not be read: nodeName is the dearest of the
+  // identity getters, as it re-derives the case folding on every call.
+  var fixedName = function (nt) {
+    return nt === 3 ? "#text" : nt === 8 ? "#comment" : nt === 9 ? "#document" : nt === 11 ? "#document-fragment" : null;
+  };
   var tailOf = function (v, cls) {
     var nt = v.nodeType;
     if (typeof nt !== "number") return SEP + cls + SEP;
     if (nt !== 1) {
-      var nn = v.nodeName, byNode = infoTails[cls] || (infoTails[cls] = Object.create(null));
+      var nn = fixedName(nt) || v.nodeName, byNode = infoTails[cls] || (infoTails[cls] = Object.create(null));
       return byNode[nn] || (byNode[nn] = SEP + cls + SEP + nt + SEP + nn);
     }
     // the local name is compared: an HTML element made with createElementNS can share a tag name and class with
@@ -145,7 +151,7 @@
     if (id === undefined) {
       id = free.length ? free.pop() : byId.length;
       try { v[HID] = id; } catch (e) { byObj.set(v, id); }
-      byId[id] = v; sent[id] = 0; live++;
+      byId[id] = v; sent[id] = 0; liveBox.v++;
     }
     sent[id]++;
     return (infos[id] = "h" + id + tailOf(v, cls));
@@ -160,7 +166,7 @@
       var cls = classOf(v);
       if (cls) {
         out.c = cls;
-        if (typeof v.nodeType === "number") { out.t = v.nodeType; out.n = v.nodeName; }
+        if (typeof v.nodeType === "number") { out.t = v.nodeType; out.n = fixedName(v.nodeType) || v.nodeName; }
       }
     }
     return out;
@@ -251,7 +257,19 @@
       case "undefined": case "boolean": return true;
       case "number": return v === v && v !== Infinity && v !== -Infinity && !(v === 0 && 1 / v < 0);
       case "string": return v.indexOf(SEP) < 0 && v.indexOf("\u0002") < 0 && v.indexOf("\u0003") < 0;
-      case "object": return v === null || (v !== g && plainProtoName(v) !== null && !Array.isArray(v) && !(v instanceof Date));
+      case "object": {
+        // the global object is plain as the handle it already has: a callback the page calls
+        // without a receiver (a collection's forEach with no thisArg, a timer) runs with the
+        // window as its `this`, and rejecting it here put every such callback on the JSON path
+        if (v === null || v === g) return true;
+        // an object whose handle string is already on record needs no prototype walk to be
+        // plain: the token builder returns that string as it stands
+        var hid = v[HID];
+        if (hid !== undefined && byId[hid] === v && infos[hid] !== undefined) return true;
+        var bid = byObj.get(v);
+        if (bid !== undefined && infos[bid] !== undefined) return true;
+        return plainProtoName(v) !== null && !Array.isArray(v) && !(v instanceof Date);
+      }
       default: return false;
     }
   };
@@ -263,6 +281,7 @@
       case "string": return "s" + v;
       default: {
         if (v === null) return "N";
+        if (v === g) return "h" + idFor(g);
         var cls = plainProtoName(v);
         if (withEvent && g.Event && v instanceof g.Event) return eventToken(v, cls);
         return handleString(v, cls);
@@ -270,32 +289,39 @@
     }
   };
   var callHost = function (id, self, args) {
-    var plain = plainTokenOk(self);
-    for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
-    if (plain) {
-      // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
-      var ptoks = [plainToken(self, false)];
-      for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
-      var preply = g.__host.callback(String(id), "\u0005" + ptoks.join("\u0002"));
-      if (preply === undefined) throw new Error("the host has no function " + id);
-      if (preply.charCodeAt(0) === 6) return tokenValue(preply.slice(1));
-      var pr = JSON.parse(preply);
-      if (pr.x) throw rebuild(pr.x);
-      return dec(pr.v);
-    }
-    var selfEnc = enc(self), list = Array.prototype.map.call(args, enc);
-    // A callback whose values are all handles, strings, numbers, booleans or null/undefined (an event listener)
-    // goes as compact tokens; anything else falls back to the JSON form both sides already understand.
-    var toks = tokenOf(selfEnc);
-    if (toks !== null) {
-      toks = [toks];
-      for (var i = 0; i < list.length; i++) {
-        var t = tokenOf(list[i]);
-        if (t === null) { toks = null; break; }
-        toks.push(t);
+    // The fast way in C (__native.dom.fastCall) shapes the plain tokens there, makes the
+    // call and hands back the raw reply; anything it cannot shape it declines before
+    // calling, and the interpreter way below serves. Either way the page's mutation
+    // version (the C tree/attribute version) rides with the call: the host drops what it
+    // has read only when the version has moved since it read, so a callback the page
+    // reaches without changing anything does not cost the host its cached reads.
+    var reply = D.fastCall ? D.fastCall(id, self, args) : undefined;
+    if (reply === undefined) {
+      var ver = -1;
+      try { ver = D.version(); } catch (e) {}
+      var plain = plainTokenOk(self);
+      for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
+      if (plain) {
+        // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
+        var ptoks = [plainToken(self, false)];
+        for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
+        reply = g.__host.callback(String(id), "\u0005" + ver + "\u0001" + ptoks.join("\u0002"));
+      } else {
+        var selfEnc = enc(self), list = Array.prototype.map.call(args, enc);
+        // A callback whose values are all handles, strings, numbers, booleans or null/undefined (an event listener)
+        // goes as compact tokens; anything else falls back to the JSON form both sides already understand.
+        var toks = tokenOf(selfEnc);
+        if (toks !== null) {
+          toks = [toks];
+          for (var i = 0; i < list.length; i++) {
+            var t = tokenOf(list[i]);
+            if (t === null) { toks = null; break; }
+            toks.push(t);
+          }
+        }
+        reply = g.__host.callback(String(id), toks ? "\u0005" + ver + "\u0001" + toks.join("\u0002") : JSON.stringify([selfEnc, list, ver]));
       }
     }
-    var reply = g.__host.callback(String(id), toks ? "\u0005" + toks.join("\u0002") : JSON.stringify([selfEnc, list]));
     if (reply === undefined) throw new Error("the host has no function " + id);
     if (reply.charCodeAt(0) === 6) return tokenValue(reply.slice(1));
     var r = JSON.parse(reply);
@@ -555,11 +581,11 @@
         if (left > 0) { sent[id] = left; return; }
         if (o && typeof o === "object" && o[HID] === id) { try { o[HID] = undefined; } catch (err) { byObj.delete(o); } }
         else byObj.delete(o);
-        byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); live--;
+        byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); liveBox.v--;
       });
       return null;
     },
-    live: function () { return live; },
+    live: function () { return liveBox.v; },
     // of these objects, the ids of the nodes that are not in a document (the host may stop pinning their wrappers)
     detached: function (r) {
       return json(r[1].filter(function (id) {
@@ -589,6 +615,9 @@
 
   // for the fast path in C (qd_rpc): the handle table, how an object is answered, how an error is
   g.__byId = byId;
+  // the same bookkeeping reply() keeps, for the node answers qd_rpc makes in C: an answer made
+  // there must leave these tables exactly as handleString would have
+  g.__rpcTables = { byId: byId, sent: sent, free: free, infos: infos, hid: HID, liveBox: liveBox, byObj: byObj, pcls: PCLS, evStatic: EV_STATIC };
   g.__reply = reply;
   g.__rpcError = function (e) { return "x" + JSON.stringify(errorInfo(e)); };
 

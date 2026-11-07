@@ -672,6 +672,18 @@ export class Bridge {
    * Pinned wrappers of nodes that have left the document are let go in sweeps (see sweepPinned), or none of a framework's
    * removed nodes would ever be freed, in the host or in the page.
    */
+  private sweepPinnedQueued = false;
+  private scheduleSweepPinned(): void {
+    if (this.sweepPinnedQueued) return;
+    this.sweepPinnedQueued = true;
+    realQueueMicrotask(() => {
+      this.sweepPinnedQueued = false;
+      if (this.pinned.size >= this.pinLimit && !this.txn && !this.pinSweeping && !this.closed) {
+        this.sweepPinned();
+      }
+    });
+  }
+
   private pin(wrapper: object): void {
     const cell = (wrapper as any)[HANDLE] as Cell | undefined;
     if (cell) {
@@ -679,7 +691,9 @@ export class Bridge {
       cell.pinned = true;
     }
     this.pinned.add(wrapper);
-    if (this.pinned.size >= this.pinLimit && !this.txn && !this.pinSweeping && !this.closed) this.sweepPinned();
+    if (this.pinned.size >= this.pinLimit && !this.txn && !this.pinSweeping && !this.closed) {
+      this.scheduleSweepPinned();
+    }
   }
 
   private sweepPinned(): void {
@@ -710,6 +724,10 @@ export class Bridge {
 
   /** How many wrappers carry host-set properties and are kept alive for them (for tests that look for leaks). */
   pinnedCount(): number {
+    if ((this.sweepPinnedQueued || this.pinned.size >= this.pinLimit) && !this.txn && !this.pinSweeping && !this.closed) {
+      this.sweepPinnedQueued = false;
+      this.sweepPinned();
+    }
     return this.pinned.size;
   }
 
@@ -1519,7 +1537,10 @@ export class Bridge {
     for (const cls of this.classes.values()) delete cls.prototype[member];
   }
 
-  private readonly handleTails = new Map<string, Omit<Handle, "i">>();
+  private readonly handleTails = new Map<
+    string,
+    { c?: string; t?: number; n?: string; l?: string; g?: string; proto?: any; handler?: ProxyHandler<object> }
+  >();
 
   private handleOf(s: string): unknown {
     const sep = s.indexOf("\u0001");
@@ -1543,10 +1564,20 @@ export class Bridge {
     let p = this.handleTails.get(tail);
     if (!p) {
       const [c, t, n, l, g] = tail.split("\u0001");
-      p = { c: c || undefined, t: t === undefined || t === "" ? undefined : Number(t), n, l, g };
+      const clsName = c || undefined;
+      const cls = clsName && clsName !== "Function" ? this.cls(clsName) : undefined;
+      p = {
+        c: clsName,
+        t: t === undefined || t === "" ? undefined : Number(t),
+        n,
+        l,
+        g,
+        proto: cls ? cls.prototype : undefined,
+        handler: cls ? (cls[INDEXED] ? this.indexedClassProxyHandler : this.classProxyHandler) : undefined,
+      };
       this.handleTails.set(tail, p);
     }
-    return this.newWrapper({ i: id, c: p.c, t: p.t, n: p.n, l: p.l, g: p.g });
+    return this.newWrapperWithTail(id, p);
   }
 
   private error(info: ErrorInfo): Error {
@@ -2202,6 +2233,28 @@ export class Bridge {
       return known;
     }
     return this.newWrapper(h);
+  }
+
+  private newWrapperWithTail(
+    id: number,
+    p: { c?: string; t?: number; n?: string; l?: string; g?: string; proto?: any; handler?: ProxyHandler<object> }
+  ): unknown {
+    const cell: Cell = { id, count: 1, c: p.c, t: p.t, n: p.n, l: p.l, g: p.g };
+    let w: any;
+    if (p.proto) {
+      const obj = Object.create(p.proto);
+      obj[HANDLE] = cell;
+      w = new Proxy(obj, p.handler!);
+    } else {
+      const cls = p.c ? this.cls(p.c) : undefined;
+      if (p.c === "Function") w = this.functionWrapper(cell);
+      else if (cls) w = this.classWrapper(cell, cls);
+      else w = this.dynamicWrapper(cell, p.c === "Window");
+    }
+    cell.self = w;
+    this.wrappers.set(id, new WeakRef(w));
+    this.registry.register(w, cell);
+    return w;
   }
 
   private newWrapper(h: Handle): unknown {

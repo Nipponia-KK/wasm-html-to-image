@@ -289,37 +289,39 @@
     }
   };
   var callHost = function (id, self, args) {
-    // the page's mutation version (the C tree/attribute version) rides with the call: the host
-    // drops what it has read only when the version has moved since it read, so a callback the
-    // page reaches without changing anything does not cost the host its cached reads
-    var ver = -1;
-    try { ver = D.version(); } catch (e) {}
-    var plain = plainTokenOk(self);
-    for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
-    if (plain) {
-      // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
-      var ptoks = [plainToken(self, false)];
-      for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
-      var preply = g.__host.callback(String(id), "\u0005" + ver + "\u0001" + ptoks.join("\u0002"));
-      if (preply === undefined) throw new Error("the host has no function " + id);
-      if (preply.charCodeAt(0) === 6) return tokenValue(preply.slice(1));
-      var pr = JSON.parse(preply);
-      if (pr.x) throw rebuild(pr.x);
-      return dec(pr.v);
-    }
-    var selfEnc = enc(self), list = Array.prototype.map.call(args, enc);
-    // A callback whose values are all handles, strings, numbers, booleans or null/undefined (an event listener)
-    // goes as compact tokens; anything else falls back to the JSON form both sides already understand.
-    var toks = tokenOf(selfEnc);
-    if (toks !== null) {
-      toks = [toks];
-      for (var i = 0; i < list.length; i++) {
-        var t = tokenOf(list[i]);
-        if (t === null) { toks = null; break; }
-        toks.push(t);
+    // The fast way in C (__native.dom.fastCall) shapes the plain tokens there, makes the
+    // call and hands back the raw reply; anything it cannot shape it declines before
+    // calling, and the interpreter way below serves. Either way the page's mutation
+    // version (the C tree/attribute version) rides with the call: the host drops what it
+    // has read only when the version has moved since it read, so a callback the page
+    // reaches without changing anything does not cost the host its cached reads.
+    var reply = D.fastCall ? D.fastCall(id, self, args) : undefined;
+    if (reply === undefined) {
+      var ver = -1;
+      try { ver = D.version(); } catch (e) {}
+      var plain = plainTokenOk(self);
+      for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
+      if (plain) {
+        // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
+        var ptoks = [plainToken(self, false)];
+        for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
+        reply = g.__host.callback(String(id), "\u0005" + ver + "\u0001" + ptoks.join("\u0002"));
+      } else {
+        var selfEnc = enc(self), list = Array.prototype.map.call(args, enc);
+        // A callback whose values are all handles, strings, numbers, booleans or null/undefined (an event listener)
+        // goes as compact tokens; anything else falls back to the JSON form both sides already understand.
+        var toks = tokenOf(selfEnc);
+        if (toks !== null) {
+          toks = [toks];
+          for (var i = 0; i < list.length; i++) {
+            var t = tokenOf(list[i]);
+            if (t === null) { toks = null; break; }
+            toks.push(t);
+          }
+        }
+        reply = g.__host.callback(String(id), toks ? "\u0005" + ver + "\u0001" + toks.join("\u0002") : JSON.stringify([selfEnc, list, ver]));
       }
     }
-    var reply = g.__host.callback(String(id), toks ? "\u0005" + ver + "\u0001" + toks.join("\u0002") : JSON.stringify([selfEnc, list, ver]));
     if (reply === undefined) throw new Error("the host has no function " + id);
     if (reply.charCodeAt(0) === 6) return tokenValue(reply.slice(1));
     var r = JSON.parse(reply);
@@ -615,7 +617,7 @@
   g.__byId = byId;
   // the same bookkeeping reply() keeps, for the node answers qd_rpc makes in C: an answer made
   // there must leave these tables exactly as handleString would have
-  g.__rpcTables = { byId: byId, sent: sent, free: free, infos: infos, hid: HID, liveBox: liveBox };
+  g.__rpcTables = { byId: byId, sent: sent, free: free, infos: infos, hid: HID, liveBox: liveBox, byObj: byObj, pcls: PCLS, evStatic: EV_STATIC };
   g.__reply = reply;
   g.__rpcError = function (e) { return "x" + JSON.stringify(errorInfo(e)); };
 

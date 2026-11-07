@@ -40,7 +40,14 @@ static JSValue cached_host_fn = JS_UNDEFINED;
 static JSValue cached_byid = JS_UNDEFINED;
 static JSValue cached_tables = JS_UNDEFINED;
 static JSAtom cached_hid_atom = 0;
+static JSAtom cached_pcls_atom = 0;
+static JSAtom cached_evstatic_atom = 0;
+static JSValue cached_event_proto = JS_UNDEFINED;
 static JSContext *cached_ctx = NULL;
+
+/* the guest->host callback shaped in C (defined below, registered on __native.dom in qd_init) */
+static JSValue js_fast_call(JSContext *c, JSValueConst self, int argc, JSValueConst *argv);
+static JSContext *fc_atoms_ctx = NULL;
 
 static void reset_rpc_cache(void) {
     if (cached_ctx) {
@@ -51,6 +58,9 @@ static void reset_rpc_cache(void) {
         if (!JS_IsUndefined(cached_byid)) JS_FreeValue(cached_ctx, cached_byid);
         if (!JS_IsUndefined(cached_tables)) JS_FreeValue(cached_ctx, cached_tables);
         if (cached_hid_atom) JS_FreeAtom(cached_ctx, cached_hid_atom);
+        if (cached_pcls_atom) JS_FreeAtom(cached_ctx, cached_pcls_atom);
+        if (cached_evstatic_atom) JS_FreeAtom(cached_ctx, cached_evstatic_atom);
+        if (!JS_IsUndefined(cached_event_proto)) JS_FreeValue(cached_ctx, cached_event_proto);
     }
     cached_rpc_fn = JS_UNDEFINED;
     cached_reply_fn = JS_UNDEFINED;
@@ -59,7 +69,11 @@ static void reset_rpc_cache(void) {
     cached_byid = JS_UNDEFINED;
     cached_tables = JS_UNDEFINED;
     cached_hid_atom = 0;
+    cached_pcls_atom = 0;
+    cached_evstatic_atom = 0;
+    cached_event_proto = JS_UNDEFINED;
     cached_ctx = NULL;
+    fc_atoms_ctx = NULL;
 }
 
 static void update_rpc_cache(void) {
@@ -77,6 +91,15 @@ static void update_rpc_cache(void) {
             JSValue hid = JS_GetPropertyStr(ctx, cached_tables, "hid");
             if (JS_IsSymbol(hid)) cached_hid_atom = JS_ValueToAtom(ctx, hid);
             JS_FreeValue(ctx, hid);
+            JSValue pc = JS_GetPropertyStr(ctx, cached_tables, "pcls");
+            if (JS_IsSymbol(pc)) cached_pcls_atom = JS_ValueToAtom(ctx, pc);
+            JS_FreeValue(ctx, pc);
+            JSValue es = JS_GetPropertyStr(ctx, cached_tables, "evStatic");
+            if (JS_IsSymbol(es)) cached_evstatic_atom = JS_ValueToAtom(ctx, es);
+            JS_FreeValue(ctx, es);
+            JSValue ev = JS_GetPropertyStr(ctx, global, "Event");
+            if (JS_IsFunction(ctx, ev)) cached_event_proto = JS_GetPropertyStr(ctx, ev, "prototype");
+            JS_FreeValue(ctx, ev);
         }
         JS_FreeValue(ctx, global);
     }
@@ -386,6 +409,9 @@ EXPORT("qd_init") int qd_init(size_t memory_limit, size_t stack_limit) {
     JSValue native = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, native, "parseHTML", JS_NewCFunction(ctx, native_parse_html, "parseHTML", 2));
     nd_register(ctx, native);
+    JSValue dom = JS_GetPropertyStr(ctx, native, "dom");
+    if (JS_IsObject(dom)) JS_SetPropertyStr(ctx, dom, "fastCall", JS_NewCFunction(ctx, js_fast_call, "fastCall", 3));
+    JS_FreeValue(ctx, dom);
     JS_SetPropertyStr(ctx, global, "__native", native);
     JS_FreeValue(ctx, global);
     return 0;
@@ -750,6 +776,521 @@ static int rpc_answer_kids(ND *n, int elementsOnly) {
     free(buf);
     free(ids);
     return ok ? 0 : -1;
+}
+
+/* ---- the guest->host callback shaped here (__native.dom.fastCall) ----
+   rpc.js's callHost spends the interpreter's time shaping the plain tokens of a call into
+   a function of the host's (a listener, an observer callback): plainness checks, handle
+   strings, an event's token bundle. This is that shaping in C, against rpc.js's own
+   tables, producing the identical payload and making the identical call (host_module
+   kind 2, as __host.callback does); the raw reply goes back to callHost, whose own reply
+   handling finishes it. Anything this side cannot shape exactly as callHost would — a
+   function or symbol argument, an object it cannot name, a value with separators in it —
+   is declined BEFORE the host is called (undefined is returned), with the sent counts of
+   any handles already shaped put back, and callHost's interpreter way serves. */
+
+typedef struct { char *p; size_t len, cap; } Buf;
+static int buf_put(Buf *b, const void *s, size_t n) {
+    if (b->len + n > b->cap) {
+        size_t ncap = b->cap ? b->cap : 256;
+        while (ncap < b->len + n) ncap *= 2;
+        char *np = realloc(b->p, ncap);
+        if (!np) return 0;
+        b->p = np;
+        b->cap = ncap;
+    }
+    if (n) memcpy(b->p + b->len, s, n);
+    b->len += n;
+    return 1;
+}
+static int buf_ch(Buf *b, char ch) { return buf_put(b, &ch, 1); }
+static int buf_str(Buf *b, const char *s) { return buf_put(b, s, strlen(s)); }
+
+typedef struct { JSValue sent, infos, freeArr, liveBox, byObj; } FcTables;
+static void fc_tables_free(FcTables *t) {
+    JS_FreeValue(ctx, t->sent);
+    JS_FreeValue(ctx, t->infos);
+    JS_FreeValue(ctx, t->freeArr);
+    JS_FreeValue(ctx, t->liveBox);
+    JS_FreeValue(ctx, t->byObj);
+}
+static int fc_tables(FcTables *t) {
+    t->sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
+    t->infos = JS_GetPropertyStr(ctx, cached_tables, "infos");
+    t->freeArr = JS_GetPropertyStr(ctx, cached_tables, "free");
+    t->liveBox = JS_GetPropertyStr(ctx, cached_tables, "liveBox");
+    t->byObj = JS_GetPropertyStr(ctx, cached_tables, "byObj");
+    if (JS_IsArray(t->sent) == 1 && JS_IsArray(t->infos) == 1 && JS_IsArray(t->freeArr) == 1 && JS_IsObject(t->liveBox) && JS_IsObject(t->byObj)) return 1;
+    fc_tables_free(t);
+    return 0;
+}
+
+/* sent[id]++, remembering the id so a declined call can put the count back */
+static void fc_sent_bump(FcTables *t, int64_t id, int64_t *sentIds, int *nSent) {
+    JSValue sv = JS_GetPropertyUint32(ctx, t->sent, (uint32_t)id);
+    int64_t s = 0;
+    JS_ToInt64(ctx, &s, sv);
+    JS_FreeValue(ctx, sv);
+    JS_SetPropertyUint32(ctx, t->sent, (uint32_t)id, JS_NewInt64(ctx, s + 1));
+    if (*nSent < 80) sentIds[(*nSent)++] = id;
+}
+static void fc_sent_putback(FcTables *t, int64_t *sentIds, int nSent) {
+    for (int i = 0; i < nSent; i++) {
+        JSValue sv = JS_GetPropertyUint32(ctx, t->sent, (uint32_t)sentIds[i]);
+        int64_t s = 0;
+        JS_ToInt64(ctx, &s, sv);
+        JS_FreeValue(ctx, sv);
+        if (s > 0) JS_SetPropertyUint32(ctx, t->sent, (uint32_t)sentIds[i], JS_NewInt64(ctx, s - 1));
+    }
+}
+
+/* The bridge id an object already has (its HID, verified against byId, or its byObj
+   entry), or -1 when it has none. Nothing is assigned here. */
+static int64_t fc_id_lookup(JSValueConst v, FcTables *t) {
+    JSValue idv = JS_GetProperty(ctx, v, cached_hid_atom);
+    if (JS_IsException(idv)) {
+        JS_FreeValue(ctx, idv);
+        return -1;
+    }
+    int64_t id = -1;
+    if (JS_IsNumber(idv)) {
+        int64_t cand = 0;
+        JS_ToInt64(ctx, &cand, idv);
+        if (cand >= 0) {
+            JSValue cur = JS_GetPropertyUint32(ctx, cached_byid, (uint32_t)cand);
+            if (JS_VALUE_GET_PTR(cur) == JS_VALUE_GET_PTR(v)) id = cand;
+            JS_FreeValue(ctx, cur);
+        }
+    }
+    JS_FreeValue(ctx, idv);
+    if (id >= 0) return id;
+    JSValue get = JS_GetPropertyStr(ctx, t->byObj, "get");
+    if (JS_IsFunction(ctx, get)) {
+        JSValue r = JS_Call(ctx, get, t->byObj, 1, &v);
+        JS_FreeValue(ctx, get);
+        if (JS_IsNumber(r)) {
+            JS_ToInt64(ctx, &id, r);
+            JS_FreeValue(ctx, r);
+            return id;
+        }
+        JS_FreeValue(ctx, r);
+    } else {
+        JS_FreeValue(ctx, get);
+    }
+    return -1;
+}
+
+/* The bridge id of an object, assigned as rpc.js's idFor assigns it when it has none:
+   the HID property when the object takes it, the byObj map when it does not. The fresh
+   id's sent count is 0; the caller counts the send, as handleString's callers do. */
+static int64_t fc_id_for(JSValueConst v, FcTables *t) {
+    int64_t id = fc_id_lookup(v, t);
+    if (id >= 0) return id;
+    int64_t flen = 0;
+    if (JS_GetLength(ctx, t->freeArr, &flen)) return -1;
+    if (flen > 0) {
+        JSValue fv = JS_GetPropertyUint32(ctx, t->freeArr, (uint32_t)(flen - 1));
+        if (!JS_IsNumber(fv)) {
+            JS_FreeValue(ctx, fv);
+            return -1;
+        }
+        JS_ToInt64(ctx, &id, fv);
+        JS_FreeValue(ctx, fv);
+        if (JS_SetLength(ctx, t->freeArr, flen - 1) < 0) return -1;
+    } else {
+        int64_t blen = 0;
+        if (JS_GetLength(ctx, cached_byid, &blen)) return -1;
+        id = blen;
+    }
+    if (JS_SetProperty(ctx, v, cached_hid_atom, JS_NewInt64(ctx, id)) < 0) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        JSValue set = JS_GetPropertyStr(ctx, t->byObj, "set");
+        if (JS_IsFunction(ctx, set)) {
+            JSValue pair[2];
+            pair[0] = (JSValue)v;
+            pair[1] = JS_NewInt64(ctx, id);
+            JSValue r = JS_Call(ctx, set, t->byObj, 2, pair);
+            JS_FreeValue(ctx, r);
+        }
+        JS_FreeValue(ctx, set);
+    }
+    JS_SetPropertyUint32(ctx, cached_byid, (uint32_t)id, JS_DupValue(ctx, v));
+    JS_SetPropertyUint32(ctx, t->sent, (uint32_t)id, JS_NewInt32(ctx, 0));
+    JSValue lv = JS_GetPropertyStr(ctx, t->liveBox, "v");
+    int64_t lvn = 0;
+    JS_ToInt64(ctx, &lvn, lv);
+    JS_FreeValue(ctx, lv);
+    JS_SetPropertyStr(ctx, t->liveBox, "v", JS_NewInt64(ctx, lvn + 1));
+    return id;
+}
+
+/* The class name a non-node object answers with: its direct prototype's own PCLS, the
+   name rpc.js's plainProtoName reads. Copied into buf; NULL when there is none. */
+static const char *fc_own_pcls(JSValueConst v, char *buf, size_t cap) {
+    if (!cached_pcls_atom) return NULL;
+    JSValue proto = JS_GetPrototype(ctx, v);
+    if (!JS_IsObject(proto)) {
+        JS_FreeValue(ctx, proto);
+        return NULL;
+    }
+    JSPropertyDescriptor desc;
+    const char *out = NULL;
+    if (JS_GetOwnProperty(ctx, &desc, proto, cached_pcls_atom) == 1) {
+        if (JS_IsString(desc.value)) {
+            size_t n;
+            const char *s = JS_ToCStringLen(ctx, &n, desc.value);
+            if (s && n < cap) {
+                memcpy(buf, s, n + 1);
+                out = buf;
+            }
+            if (s) JS_FreeCString(ctx, s);
+        }
+        JS_FreeValue(ctx, desc.value);
+        JS_FreeValue(ctx, desc.getter);
+        JS_FreeValue(ctx, desc.setter);
+    }
+    JS_FreeValue(ctx, proto);
+    return out;
+}
+
+static int fc_has_numeric_node_type(JSValueConst v) {
+    JSValue nt = JS_GetPropertyStr(ctx, v, "nodeType");
+    int yes = JS_IsNumber(nt);
+    JS_FreeValue(ctx, nt);
+    return yes;
+}
+
+/* The handle string of a non-node object, appended to out: rpc.js's handleString for the
+   shapes it can reach through plainToken — a recorded answer as it stands, or the
+   class-only tail (an object with a numeric nodeType of its own is left to rpc.js, whose
+   tailOf reads its nodeName). */
+static int fc_handle_general(JSValueConst v, Buf *out, FcTables *t, int64_t *sentIds, int *nSent) {
+    int64_t id = fc_id_lookup(v, t);
+    char clsbuf[48];
+    const char *cls = NULL;
+    if (id >= 0) {
+        JSValue info = JS_GetPropertyUint32(ctx, t->infos, (uint32_t)id);
+        if (JS_IsString(info)) {
+            size_t n;
+            const char *s = JS_ToCStringLen(ctx, &n, info);
+            int ok = s && buf_put(out, s, n);
+            if (s) JS_FreeCString(ctx, s);
+            JS_FreeValue(ctx, info);
+            if (!ok) return 0;
+            fc_sent_bump(t, id, sentIds, nSent);
+            return 1;
+        }
+        JS_FreeValue(ctx, info);
+    } else {
+        cls = fc_own_pcls(v, clsbuf, sizeof clsbuf);
+        if (!cls) return 0;
+        if (fc_has_numeric_node_type(v)) return 0;
+        id = fc_id_for(v, t);
+        if (id < 0) return 0;
+    }
+    if (!cls) {
+        cls = fc_own_pcls(v, clsbuf, sizeof clsbuf);
+        if (!cls) return 0;
+        if (fc_has_numeric_node_type(v)) return 0;
+    }
+    /* compose h<id>\1<cls>\1 and record it, as handleString does */
+    Buf part = {0};
+    char num[24];
+    int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
+    int ok = buf_ch(&part, 'h') && buf_put(&part, num, (size_t)numlen) && buf_ch(&part, 1) && buf_str(&part, cls) && buf_ch(&part, 1);
+    if (ok) {
+        JSValue ans = JS_NewStringLen(ctx, part.p, part.len);
+        if (JS_IsException(ans)) {
+            JS_FreeValue(ctx, ans);
+            ok = 0;
+        } else {
+            JS_SetPropertyUint32(ctx, t->infos, (uint32_t)id, JS_DupValue(ctx, ans));
+            JS_FreeValue(ctx, ans);
+            fc_sent_bump(t, id, sentIds, nSent);
+            ok = buf_put(out, part.p, part.len);
+        }
+    }
+    free(part.p);
+    return ok;
+}
+
+static const char *FC_EVENT_PROPS[] = {
+    "type", "bubbles", "cancelable", "composed", "isTrusted", "timeStamp", "detail", "button", "buttons",
+    "clientX", "clientY", "pageX", "pageY", "screenX", "screenY", "offsetX", "offsetY", "ctrlKey", "shiftKey",
+    "altKey", "metaKey", "key", "code", "location", "repeat", "isComposing", "inputType", "data", "deltaX",
+    "deltaY", "deltaZ", "deltaMode", "pointerId", "width", "height", "pressure", "pointerType", "isPrimary",
+    "which", "keyCode", "charCode",
+};
+static const char *FC_EVENT_REFS[] = { "target", "currentTarget", "srcElement", "relatedTarget", "view" };
+#define FC_NPROPS (sizeof(FC_EVENT_PROPS) / sizeof(FC_EVENT_PROPS[0]))
+#define FC_NREFS (sizeof(FC_EVENT_REFS) / sizeof(FC_EVENT_REFS[0]))
+static JSAtom fc_prop_atoms[sizeof(FC_EVENT_PROPS) / sizeof(FC_EVENT_PROPS[0])];
+static JSAtom fc_ref_atoms[sizeof(FC_EVENT_REFS) / sizeof(FC_EVENT_REFS[0])];
+static void fc_atoms(void) {
+    if (fc_atoms_ctx == ctx) return;
+    for (size_t i = 0; i < FC_NPROPS; i++) fc_prop_atoms[i] = JS_NewAtom(ctx, FC_EVENT_PROPS[i]);
+    for (size_t i = 0; i < FC_NREFS; i++) fc_ref_atoms[i] = JS_NewAtom(ctx, FC_EVENT_REFS[i]);
+    fc_atoms_ctx = ctx;
+}
+
+static int fc_is_event(JSValueConst v) {
+    if (!JS_IsObject(cached_event_proto)) return 0;
+    JSValue p = JS_GetPrototype(ctx, v);
+    int found = 0;
+    for (int i = 0; i < 40 && JS_IsObject(p); i++) {
+        if (JS_VALUE_GET_PTR(p) == JS_VALUE_GET_PTR(cached_event_proto)) { found = 1; break; }
+        JSValue up = JS_GetPrototype(ctx, p);
+        JS_FreeValue(ctx, p);
+        p = up;
+    }
+    JS_FreeValue(ctx, p);
+    return found;
+}
+
+/* one \u0003-separated field of an event token: the key, \u0001, a typed token of the
+   value, for the values rpc.js's eventToken carries (a boolean, a plain number, a
+   separator-free string, null); anything else is not a field */
+static int fc_event_field(Buf *parts, int *nparts, const char *key, JSValueConst val) {
+    Buf one = {0};
+    int ok = buf_str(&one, key) && buf_ch(&one, 1);
+    int tag = JS_VALUE_GET_TAG(val);
+    if (tag == JS_TAG_BOOL) {
+        ok = ok && buf_ch(&one, JS_VALUE_GET_BOOL(val) ? 'T' : 'F');
+    } else if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
+        double d = 0;
+        JS_ToFloat64(ctx, &d, val);
+        if (d - d == 0 && !(d == 0 && 1.0 / d < 0)) {
+            size_t n;
+            const char *s = JS_ToCStringLen(ctx, &n, val);
+            ok = ok && s && buf_ch(&one, 'n') && buf_put(&one, s, n);
+            if (s) JS_FreeCString(ctx, s);
+        } else ok = 0;
+    } else if (tag == JS_TAG_STRING) {
+        size_t n;
+        const char *s = JS_ToCStringLen(ctx, &n, val);
+        if (s && !memchr(s, 1, n) && !memchr(s, 2, n) && !memchr(s, 3, n)) ok = ok && buf_ch(&one, 's') && buf_put(&one, s, n);
+        else ok = 0;
+        if (s) JS_FreeCString(ctx, s);
+    } else if (tag == JS_TAG_NULL) {
+        ok = ok && buf_ch(&one, 'N');
+    } else {
+        ok = 0;
+    }
+    if (ok) {
+        if (*nparts && !buf_ch(parts, 3)) ok = 0;
+        else if (!buf_put(parts, one.p, one.len)) ok = 0;
+        else (*nparts)++;
+    }
+    free(one.p);
+    return ok;
+}
+
+/* an event's token: rpc.js's eventToken — its handle string, the cached static fields,
+   the per-call defaultPrevented and eventPhase, and the reference fields whose handles
+   this side can shape (one it cannot is skipped, as eventToken skips a null handle) */
+static int fc_event_token(JSValueConst ev, Buf *out, FcTables *t, int64_t *sentIds, int *nSent, JSValueConst global) {
+    fc_atoms();
+    Buf parts = {0};
+    int nparts = 0, ok = 1;
+    Buf hs = {0};
+    if (!fc_handle_general(ev, &hs, t, sentIds, nSent)) ok = 0;
+    if (ok && !buf_put(&parts, hs.p, hs.len)) ok = 0;
+    free(hs.p);
+    if (ok) nparts = 1;
+    /* the static fields: the event's own cache when it has one, composed (and cached) here */
+    if (ok) {
+        JSValue st = JS_GetProperty(ctx, ev, cached_evstatic_atom);
+        if (JS_IsString(st)) {
+            size_t n;
+            const char *s = JS_ToCStringLen(ctx, &n, st);
+            if (s && n) ok = buf_ch(&parts, 3) && buf_put(&parts, s, n) && (nparts++, 1);
+            if (s) JS_FreeCString(ctx, s);
+            JS_FreeValue(ctx, st);
+        } else {
+            JS_FreeValue(ctx, st);
+            Buf sub = {0};
+            int nsub = 0;
+            for (size_t i = 0; ok && i < FC_NPROPS; i++) {
+                int has = JS_HasProperty(ctx, ev, fc_prop_atoms[i]);
+                if (has < 0) { ok = 0; break; }
+                if (!has) continue;
+                JSValue val = JS_GetProperty(ctx, ev, fc_prop_atoms[i]);
+                if (JS_IsException(val)) {
+                    JS_FreeValue(ctx, val);
+                    ok = 0;
+                    break;
+                }
+                /* a field this side does not carry is simply not a field (ok stays) */
+                fc_event_field(&sub, &nsub, FC_EVENT_PROPS[i], val);
+                JS_FreeValue(ctx, val);
+            }
+            if (ok) {
+                JSValue joined = JS_NewStringLen(ctx, sub.p ? sub.p : "", sub.len);
+                if (JS_IsException(joined)) {
+                    JS_FreeValue(ctx, joined);
+                    ok = 0;
+                } else {
+                    JS_SetProperty(ctx, ev, cached_evstatic_atom, JS_DupValue(ctx, joined));
+                    JS_FreeValue(ctx, joined);
+                    if (sub.len) ok = buf_ch(&parts, 3) && buf_put(&parts, sub.p, sub.len) && (nparts++, 1);
+                }
+            }
+            free(sub.p);
+        }
+    }
+    if (ok) {
+        JSValue dp = JS_GetPropertyStr(ctx, ev, "defaultPrevented");
+        int truthy = JS_ToBool(ctx, dp);
+        JS_FreeValue(ctx, dp);
+        if (truthy < 0) ok = 0;
+        else ok = buf_ch(&parts, 3) && buf_str(&parts, "defaultPrevented") && buf_ch(&parts, 1) && buf_ch(&parts, truthy ? 'T' : 'F') && (nparts++, 1);
+    }
+    if (ok) {
+        JSValue ep = JS_GetPropertyStr(ctx, ev, "eventPhase");
+        if (JS_IsException(ep)) {
+            JS_FreeValue(ctx, ep);
+            ok = 0;
+        } else {
+            size_t n;
+            const char *s = JS_ToCStringLen(ctx, &n, ep);
+            ok = s && buf_ch(&parts, 3) && buf_str(&parts, "eventPhase") && buf_ch(&parts, 1) && buf_ch(&parts, 'n') && buf_put(&parts, s, n) && (nparts++, 1);
+            if (s) JS_FreeCString(ctx, s);
+            JS_FreeValue(ctx, ep);
+        }
+    }
+    for (size_t i = 0; ok && i < FC_NREFS; i++) {
+        int has = JS_HasProperty(ctx, ev, fc_ref_atoms[i]);
+        if (has < 0) { ok = 0; break; }
+        if (!has) continue;
+        JSValue rv = JS_GetProperty(ctx, ev, fc_ref_atoms[i]);
+        if (JS_IsException(rv)) {
+            JS_FreeValue(ctx, rv);
+            ok = 0;
+            break;
+        }
+        if (JS_IsNull(rv)) {
+            ok = buf_ch(&parts, 3) && buf_str(&parts, FC_EVENT_REFS[i]) && buf_ch(&parts, 1) && buf_ch(&parts, 'N') && (nparts++, 1);
+        } else if (JS_IsObject(rv) && JS_VALUE_GET_PTR(rv) != JS_VALUE_GET_PTR(global)) {
+            Buf hb = {0};
+            ND *rn = nd_of(rv);
+            int have = 0;
+            if (rn) {
+                int64_t rid = -1;
+                char staging[2500];
+                int len = rpc_node_handle(rv, rn, staging, sizeof staging, &rid);
+                if (len >= 0) {
+                    have = buf_put(&hb, staging, (size_t)len);
+                    if (have && rid >= 0 && *nSent < 80) sentIds[(*nSent)++] = rid;
+                }
+            } else {
+                have = fc_handle_general(rv, &hb, t, sentIds, nSent);
+            }
+            if (have) ok = buf_ch(&parts, 3) && buf_str(&parts, FC_EVENT_REFS[i]) && buf_ch(&parts, 1) && buf_put(&parts, hb.p, hb.len) && (nparts++, 1);
+            free(hb.p);
+        }
+        JS_FreeValue(ctx, rv);
+    }
+    if (ok) ok = buf_put(out, parts.p, parts.len);
+    free(parts.p);
+    return ok;
+}
+
+/* one value of a callback in its plain token form, appended to out — rpc.js's
+   plainTokenOk and plainToken together; 0 declines the whole call */
+static int fc_token(JSValueConst v, int withEvent, Buf *out, FcTables *t, int64_t *sentIds, int *nSent, JSValueConst global) {
+    int tag = JS_VALUE_GET_TAG(v);
+    if (tag == JS_TAG_STRING) {
+        size_t n;
+        const char *s = JS_ToCStringLen(ctx, &n, v);
+        if (!s) return 0;
+        int ok = !memchr(s, 1, n) && !memchr(s, 2, n) && !memchr(s, 3, n) && buf_ch(out, 's') && buf_put(out, s, n);
+        JS_FreeCString(ctx, s);
+        return ok;
+    }
+    if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
+        double d = 0;
+        JS_ToFloat64(ctx, &d, v);
+        if (!(d - d == 0 && !(d == 0 && 1.0 / d < 0))) return 0;
+        size_t n;
+        const char *s = JS_ToCStringLen(ctx, &n, v);
+        if (!s) return 0;
+        int ok = buf_ch(out, 'n') && buf_put(out, s, n);
+        JS_FreeCString(ctx, s);
+        return ok;
+    }
+    if (tag == JS_TAG_BOOL) return buf_ch(out, JS_VALUE_GET_BOOL(v) ? 'T' : 'F');
+    if (tag == JS_TAG_NULL) return buf_ch(out, 'N');
+    if (tag == JS_TAG_UNDEFINED) return buf_ch(out, 'U');
+    if (tag != JS_TAG_OBJECT) return 0;
+    if (JS_IsArray(v) == 1) return 0;
+    if (JS_VALUE_GET_PTR(v) == JS_VALUE_GET_PTR(global)) {
+        int64_t id = fc_id_for(v, t);
+        if (id < 0) return 0;
+        char num[24];
+        int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
+        if (!buf_ch(out, 'h') || !buf_put(out, num, (size_t)numlen)) return 0;
+        fc_sent_bump(t, id, sentIds, nSent);
+        return 1;
+    }
+    ND *nd = nd_of(v);
+    if (nd) {
+        char staging[2500];
+        int64_t id = -1;
+        int len = rpc_node_handle(v, nd, staging, sizeof staging, &id);
+        if (len < 0) return 0;
+        if (!buf_put(out, staging, (size_t)len)) return 0;
+        if (id >= 0 && *nSent < 80) sentIds[(*nSent)++] = id;
+        return 1;
+    }
+    if (withEvent && fc_is_event(v)) return fc_event_token(v, out, t, sentIds, nSent, global);
+    return fc_handle_general(v, out, t, sentIds, nSent);
+}
+
+static JSValue js_fast_call(JSContext *c, JSValueConst self, int argc, JSValueConst *argv) {
+    (void)self;
+    if (argc < 3 || !JS_IsObject(cached_tables) || !cached_hid_atom || !JS_IsNumber(argv[0])) return JS_UNDEFINED;
+    int64_t fid = 0;
+    JS_ToInt64(c, &fid, argv[0]);
+    FcTables t;
+    if (!fc_tables(&t)) return JS_UNDEFINED;
+    JSValue global = JS_GetGlobalObject(c);
+    Buf payload = {0};
+    int64_t sentIds[80];
+    int nSent = 0;
+    int ok = 0;
+    JSValue lenv = JS_GetPropertyStr(c, argv[2], "length");
+    uint32_t nargs = 0;
+    if (JS_IsNumber(lenv) && !JS_ToUint32(c, &nargs, lenv) && nargs <= 64) {
+        char vbuf[24];
+        int vlen = snprintf(vbuf, sizeof vbuf, "%lld", (long long)nd_version);
+        ok = buf_ch(&payload, 5) && buf_put(&payload, vbuf, (size_t)vlen) && buf_ch(&payload, 1) &&
+             fc_token(argv[1], 0, &payload, &t, sentIds, &nSent, global);
+        for (uint32_t i = 0; ok && i < nargs; i++) {
+            JSValue arg = JS_GetPropertyUint32(c, argv[2], i);
+            if (JS_IsException(arg)) {
+                JS_FreeValue(c, arg);
+                ok = 0;
+                break;
+            }
+            ok = buf_ch(&payload, 2) && fc_token(arg, i == 0 && nargs == 1, &payload, &t, sentIds, &nSent, global);
+            JS_FreeValue(c, arg);
+        }
+    }
+    JS_FreeValue(c, lenv);
+    JSValue out = JS_UNDEFINED;
+    if (ok) {
+        char idbuf[24];
+        int idlen = snprintf(idbuf, sizeof idbuf, "%lld", (long long)fid);
+        int n = host_module(2, idbuf, idlen, payload.p ? payload.p : "", (int)payload.len);
+        if (n >= 0) out = JS_NewStringLen(c, (const char *)scratch, (size_t)n);
+    } else {
+        fc_sent_putback(&t, sentIds, nSent);
+        JS_FreeValue(c, JS_GetException(c)); /* a decline leaves nothing pending: the interpreter way re-raises what it meets */
+    }
+    free(payload.p);
+    JS_FreeValue(c, global);
+    fc_tables_free(&t);
+    return out;
 }
 
 /* the answer for value v (consumed): primitives here, an object through __reply */

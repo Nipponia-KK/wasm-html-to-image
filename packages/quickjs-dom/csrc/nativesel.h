@@ -77,6 +77,7 @@ static int sel_eq_ci(const char *a, int alen, const char *b, int blen) {
     return 1;
 }
 
+static int nd_attr_case_folded(ND *n);
 static void sp_ws(SP *p) { while (p->i < p->len && h_ws((uint8_t)p->s[p->i])) p->i++; }
 
 static int sp_hex(int ch) {
@@ -580,7 +581,8 @@ static int sel_pseudo(ND *n, const SPseudo *ps) {
 
 static int sel_compound(ND *n, const SComp *k) {
     if (n->type != 1) return 0;
-    if (k->taglen && !sel_eq_ci(n->tag, n->taglen, k->tag, k->taglen)) return 0;
+    /* an HTML element is matched case-insensitively; an SVG or MathML element (foreignObject) keeps its case */
+    if (k->taglen && !(nd_attr_case_folded(n) ? sel_eq_ci(n->tag, n->taglen, k->tag, k->taglen) : (n->taglen == k->taglen && !memcmp(n->tag, k->tag, (size_t)k->taglen)))) return 0;
     if (k->idlen) {
         NAttr *a = nd_find_attr(n, "id", 2);
         if (!a || a->vlen != k->idlen || memcmp(a->val, k->id, (size_t)k->idlen) != 0) return 0;

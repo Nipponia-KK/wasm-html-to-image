@@ -115,11 +115,17 @@
   var SEP = "\u0001";
   // What follows the id in a handle string, by class and name: a page makes thousands of nodes of a few kinds.
   var infoTails = Object.create(null);
+  // The nodeName of a text, comment, document or fragment node is fixed by its type (the C
+  // getters answer exactly these), so it need not be read: nodeName is the dearest of the
+  // identity getters, as it re-derives the case folding on every call.
+  var fixedName = function (nt) {
+    return nt === 3 ? "#text" : nt === 8 ? "#comment" : nt === 9 ? "#document" : nt === 11 ? "#document-fragment" : null;
+  };
   var tailOf = function (v, cls) {
     var nt = v.nodeType;
     if (typeof nt !== "number") return SEP + cls + SEP;
     if (nt !== 1) {
-      var nn = v.nodeName, byNode = infoTails[cls] || (infoTails[cls] = Object.create(null));
+      var nn = fixedName(nt) || v.nodeName, byNode = infoTails[cls] || (infoTails[cls] = Object.create(null));
       return byNode[nn] || (byNode[nn] = SEP + cls + SEP + nt + SEP + nn);
     }
     // the local name is compared: an HTML element made with createElementNS can share a tag name and class with
@@ -160,7 +166,7 @@
       var cls = classOf(v);
       if (cls) {
         out.c = cls;
-        if (typeof v.nodeType === "number") { out.t = v.nodeType; out.n = v.nodeName; }
+        if (typeof v.nodeType === "number") { out.t = v.nodeType; out.n = fixedName(v.nodeType) || v.nodeName; }
       }
     }
     return out;

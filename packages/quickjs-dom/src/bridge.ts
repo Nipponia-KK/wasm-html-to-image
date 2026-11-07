@@ -1520,7 +1520,8 @@ export class Bridge {
       }
       return this.wrapper({ i: id });
     }
-    const known = this.wrappers.get(Number(s.slice(0, sep)))?.deref();
+    const id = Number(s.slice(0, sep));
+    const known = this.wrappers.get(id)?.deref();
     if (known) {
       (known as any)[HANDLE].count++;
       return known;
@@ -1533,7 +1534,7 @@ export class Bridge {
       p = { c: c || undefined, t: t === undefined || t === "" ? undefined : Number(t), n, l, g };
       this.handleTails.set(tail, p);
     }
-    return this.newWrapper({ i: Number(s.slice(0, sep)), c: p.c, t: p.t, n: p.n, l: p.l, g: p.g });
+    return this.newWrapper({ i: id, c: p.c, t: p.t, n: p.n, l: p.l, g: p.g });
   }
 
   private error(info: ErrorInfo): Error {

@@ -473,6 +473,15 @@ export class Bridge {
    * attribute write lands on it (attributes back properties), and the whole map goes with any full
    * invalidation, which is also what a release does before a handle id can be reused. */
   private readonly setMemo = new Map<number, Map<string, unknown>>();
+  /** The last value the host wrote (or read back) for each attribute of an element, per cell: the
+   * attribute counterpart of the set memo above. A repeated setAttribute with the value the page
+   * already has is dropped entirely. The rules mirror the set memo's: a cell's entries go when
+   * anything else lands on the cell (a property write, another attribute call, a transaction),
+   * and the whole map goes with any full invalidation. `on*` attributes are never memoized:
+   * their handler state is more than the attribute's string. Names are keyed as passed and a
+   * write purges case variants of the name, so the HTML case-insensitivity of attribute names
+   * cannot leave a stale entry describing a different value than the page's. */
+  private readonly attrMemo = new Map<number, Map<string, string>>();
   /** The running transaction (Bridge.transact), when one is open. */
   private txn: TxnState | null = null;
   private txnFlushing = false;
@@ -663,6 +672,7 @@ export class Bridge {
     this.treeGen++;
     if (this.reads.size) this.reads.clear();
     if (this.setMemo.size) this.setMemo.clear();
+    if (this.attrMemo.size) this.attrMemo.clear();
     if (this.styleObjs.size) this.styleObjs.clear();
     if (this.sreads.size) this.sreads.clear();
     // the handlers the host set are the page's own until page code runs: a change of the tree cannot touch them
@@ -963,6 +973,7 @@ export class Bridge {
       }
       if (ATTR_CALLS.has(key)) {
         this.setMemo.delete(cell.id);
+        this.attrMemo.delete(cell.id);
         this.txnAttr(state, cell, key, args);
       } else if (!LISTENER_CALLS.has(key)) {
         state.treeTouched.add(cell);
@@ -1622,6 +1633,8 @@ export class Bridge {
         return;
       }
     }
+    // a write that lands (queued or sent) can back an attribute of the cell: its attribute memo goes
+    this.attrMemo.delete(cell.id);
     if (cell.pending && !this.txn) throw new Error("quickjs-dom: this node's creation did not complete");
     const wasEmpty = cell.ek === this.codeGen && !this.txn;
     if (!memoizable && !(cell.t === 1 && ON_HANDLER.test(key))) {
@@ -1805,6 +1818,26 @@ export class Bridge {
     return dispatch;
   }
 
+  /** Record an attribute value the page is now known to hold, purging case variants of the name. */
+  private attrMemoSet(cell: Cell, name: string, value: string): void {
+    let per = this.attrMemo.get(cell.id);
+    if (!per) {
+      per = new Map();
+      this.attrMemo.set(cell.id, per);
+    }
+    const lower = name.toLowerCase();
+    for (const k of per.keys()) if (k !== name && k.toLowerCase() === lower) per.delete(k);
+    per.set(name, value);
+  }
+
+  /** Forget a cell's memo entries for an attribute name, case variants included. */
+  private attrMemoDrop(cell: Cell, name: string): void {
+    const per = this.attrMemo.get(cell.id);
+    if (!per) return;
+    const lower = name.toLowerCase();
+    for (const k of [...per.keys()]) if (k.toLowerCase() === lower) per.delete(k);
+  }
+
   private call(cell: Cell, key: string, args: unknown[], self?: unknown): unknown {
     if (cell.dead) throw new Error("quickjs-dom: this node was never created (its transaction failed)");
     if (key === "addEventListener" && args[2] && typeof args[2] === "object" && (args[2] as any).signal && !(args[2] as any).signal[HANDLE]) {
@@ -1849,6 +1882,14 @@ export class Bridge {
     if (cell.t === 9 ? CREATE_CALLS.has(key) : cell.t === 1 ? ATTR_CALLS.has(key) || LISTENER_CALLS.has(key) : false) {
       // nothing that was read can have changed (a new node is in no tree, a listener is not read), or only an attribute did
       if (this.fineOk()) {
+        // a setAttribute repeating the value the page already has (written by the host before, or
+        // read back since) has nothing to do: drop it entirely, caches and memos still describe the page
+        if (key === "setAttribute" && cell.t === 1 && typeof args[0] === "string" && !args[0].toLowerCase().startsWith("on")) {
+          const v = args[1];
+          if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+            if (this.attrMemo.get(cell.id)?.get(args[0]) === String(v)) return undefined;
+          }
+        }
         const value = this.send((cell.t === 9 || key === "toggleAttribute" ? "c" : "v") + cell.id + "\u0001" + key + "\u0001" + encoded);
         if (cell.t === 9) {
           // a node made by a document belongs to it
@@ -1868,6 +1909,18 @@ export class Bridge {
           // setAttribute("onclick", "...") replaces the handler the host set
           const attr = typeof args[0] === "string" ? args[0].toLowerCase() : "";
           if (attr.startsWith("on")) this.handlers.delete(cell.id + "\u0001set:" + attr);
+          // the attribute memo follows the write that just landed: an exact setAttribute records
+          // its value, a removal drops the name, and the namespaced/toggle forms drop the cell's
+          // whole memo (their names do not key the same way)
+          if (key === "setAttribute" && typeof args[0] === "string" && !attr.startsWith("on")) {
+            const v = args[1];
+            if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") this.attrMemoSet(cell, args[0], String(v));
+            else this.attrMemoDrop(cell, args[0]);
+          } else if (key === "removeAttribute" && typeof args[0] === "string") {
+            this.attrMemoDrop(cell, args[0]);
+          } else if (key !== "setAttribute" && key !== "removeAttribute") {
+            this.attrMemo.delete(cell.id);
+          }
         }
         return value;
       }
@@ -1896,6 +1949,10 @@ export class Bridge {
     if (this.reads.has(k)) return this.reads.get(k);
     const value = this.send("c" + cell.id + "\u0001" + key + "\u0001" + encoded);
     this.reads.set(k, value);
+    // a value read back from the page seeds the attribute memo, like a read seeds the set memo
+    if (key === "getAttribute" && cell.t === 1 && typeof args[0] === "string" && typeof value === "string" && !args[0].toLowerCase().startsWith("on")) {
+      this.attrMemoSet(cell, args[0], value);
+    }
     return value;
   }
 

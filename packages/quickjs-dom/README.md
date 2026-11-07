@@ -60,25 +60,28 @@ dom.close();
 
 ### Performance Benchmark (Node.js)
 
-*Measured on Node.js v24.22 against `jsdom` v30.1.3 (median of several runs; `scripts/bench-dom.mjs`, `scripts/bench-bridge.mjs`, `scripts/perf-check.mjs`):*
+*Measured on Node.js v24.22 against `jsdom` v31.0.0 (median of several runs; `scripts/bench-dom.mjs`, `scripts/bench-bridge.mjs`, `scripts/bench-react.mjs`, `scripts/perf-check.mjs`):*
 
 | Scenario | `jsdom` | `wasm-quickjs-dom` | Comparison |
 | :--- | :--- | :--- | :--- |
-| **HTML Parsing** (1,000 table rows, ~5,000 elements) | 85.2 ms | **16.2 ms** | **~5.3× faster** ⚡ |
-| **HTML Parsing** (~25,000 elements) | 355 ms | **94.8 ms** | **~3.7× faster** ⚡ |
-| **HTML Serialization** (`outerHTML`, ~5,000 elements) | 5.0 ms | **0.55 ms** | **~9× faster** ⚡ |
-| **Selector Query** (`tr.r3 > td a[href]` + `span.k`, ~5,000 elements) | 2.3 ms | **0.35 ms** | **~6.6× faster** ⚡ |
-| **Complex Selector Query** (500 × `querySelectorAll("tr.r3 > td a[href]")`, page changed between queries) | 1,850 ms | **102 ms** | **~18× faster** ⚡ |
-| **Page script creating 2,000 elements** (`new JSDOM(html, { runScripts: "dangerously" })`) | 34.8 ms | **10.9 ms** | **~3.2× faster** ⚡ |
-| **New page with 1,000 rows** (`createDOM` vs `new JSDOM`) | 76.2 ms | **21.4 ms** | **~3.6× faster** ⚡ |
-| **Warm Instance Creation** (`new JSDOM("<p>")`, median over 50 runs) | 4.1 ms | **2.8 ms** | **~1.5× faster** ⚡ |
-| **Testing Library**, 300 cards / 1,802 elements: `getAllByRole('button')` | 67.0 ms | **57.6 ms** | **~1.2× faster** |
-| **Testing Library**: `getByText` / `getByLabelText` / `getAllByRole('link')` | 25.5 / 23.8 / 41.2 ms | 40.9 / 32.8 / 49.4 ms | ~1.2–1.6× jsdom |
+| **HTML Parsing** (~5,000 elements) | 59.2 ms | **8.5 ms** | **~7× faster** ⚡ |
+| **HTML Parsing** (~25,000 elements) | 256 ms | **53.3 ms** | **~4.8× faster** ⚡ |
+| **HTML Serialization** (`outerHTML`, ~5,000 elements) | 4.35 ms | **0.45 ms** | **~9.7× faster** ⚡ |
+| **Selector Query** (`tr.r3 > td a[href]` + `span.k`, ~5,000 elements) | 2.3 ms | **0.9 ms** | **~2.5× faster** ⚡ |
+| **Complex Selector Query** (500 × `querySelectorAll("tr.r3 > td a[href]")`, page changed between queries) | 1,548 ms | **252 ms** | **~6× faster** ⚡ |
+| **Page script creating 2,000 elements** (`new JSDOM(html, { runScripts: "dangerously" })`) | 23.7 ms | **6.2 ms** | **~3.8× faster** ⚡ |
+| **New page with 1,000 rows** (`createDOM` vs `new JSDOM`) | 56.0 ms | **13.0 ms** | **~4.3× faster** ⚡ |
+| **Warm Instance Creation** (`new JSDOM("<p>")`, median over 60 runs) | 4.7 ms | **2.6 ms** | **~1.8× faster** ⚡ |
+| **Host builds 3,000 nodes and reads them back** (the render shape) | 34.7 ms | **11.5 ms** | **~3× faster** ⚡ |
+| **React, 3,000 items**: first mount / update | 163 / 66 ms | 328 / 140 ms | ~2× jsdom |
+| **React**: re-render of 200 items / `fireEvent.click` | 34.0 ms / 80 µs | **30.6 ms** / 256 µs | ~1.1× faster / ~3× jsdom |
+| **Testing Library**, 300 cards / 1,802 elements: `getByText` / `getAllByRole('link')` | 17.0 / 13.2 ms | 24.0 / 25.4 ms | ~1.4× / ~1.9× jsdom |
+| **Testing Library**: `getAllByRole('button')` / `getByRole('button', {name})` / `getByLabelText` | 16.5 / 18.7 / 10.5 ms | 35.8 / 51.3 / 36.6 ms | ~2.2× / ~2.7× / ~3.5× jsdom |
 
 > [!TIP]
 > **When `wasm-quickjs-dom` is faster:** Parsing HTML, serializing, executing CSS selector queries, and running client scripts that generate DOM inside the page (all execute natively in C / WebAssembly without host overhead). The advantage grows with how much work stays inside the page; on a ~25,000-element page, walking the tree with a `TreeWalker` is ~2.9× faster too.
 >
-> **Host-driven DOM queries & mutations:** Every call from the host crosses the WebAssembly bridge (~0.7 µs per cached property read against ~0.45 µs for V8-native jsdom). Building a 3,000-node tree and reading it back from the host (the render shape) takes **~0.4×** of jsdom's time; broad `@testing-library/dom` queries (`getByText`, `getByLabelText`) are within **~1.2–1.6×** of jsdom, role queries are on par or faster.
+> **Host-driven DOM queries & mutations:** Every call from the host crosses the WebAssembly bridge (~0.6 µs per cached property read against ~0.2 µs for V8-native jsdom). Building a 3,000-node tree and reading it back from the host (the render shape) takes **~0.33×** of jsdom's time, but code that walks the DOM through many small calls is slower: React mounts take about 2× jsdom, `fireEvent.click` about 3×, and broad `@testing-library/dom` queries 1.4–3.5×.
 >
 > **Instance start-up:** a warm `new JSDOM()` takes ~3 ms: the wrapper classes of the DOM interfaces are made when a page first uses them, not all at start-up.
 

@@ -464,22 +464,18 @@ static int rpc_slow(JSValueConst fn, const char *req, size_t len) {
     return 0;
 }
 
-/* A node answer made here instead of by __reply (rpc.js: handleString), for a result of the
-   fast path below. The identity the host builds its wrapper from — id, class, nodeType,
-   nodeName, localName — is read off the ND struct and the prototype the object actually
-   carries, and rpc.js's own tables (g.__rpcTables) are kept exactly as handleString keeps
-   them, so an answer made here is indistinguishable from one made there. Anything this side
-   cannot name with certainty — a prototype it did not register, a tag whose registration
-   carried no name — returns 0 and __reply answers as before. */
-static int rpc_answer_node(JSValueConst v, ND *n) {
-    if (!JS_IsObject(cached_tables) || !cached_hid_atom) return 0;
-    /* the class, from the prototype the object carries */
+/* The class name of a node, read off the prototype the object actually carries: the name is
+   certain only when that prototype is one this side registered — a tag's registered
+   prototype (which now carries its interface's name), the unknown-element prototype, the
+   element prototype, or a node kind's prototype. Anything else (an upgraded custom
+   element, a namespace-fixed prototype this side did not register) returns NULL. */
+static const char *rpc_node_cls(JSValueConst v, ND *n) {
     const char *cls = NULL;
     JSValue proto = JS_GetPrototype(ctx, v);
     if (JS_IsException(proto)) {
         JS_FreeValue(ctx, proto);
         JS_FreeValue(ctx, JS_GetException(ctx));
-        return 0;
+        return NULL;
     }
     if (n->type == 1) {
         if (!JS_IsUndefined(nd_unknown_proto) && JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(nd_unknown_proto)) {
@@ -511,13 +507,23 @@ static int rpc_answer_node(JSValueConst v, ND *n) {
         if (kn && kind >= 0 && JS_VALUE_GET_PTR(proto) == JS_VALUE_GET_PTR(nd_protos[kind])) cls = kn;
     }
     JS_FreeValue(ctx, proto);
-    if (!cls) return 0;
+    return cls;
+}
+
+/* Fills buf with the handle string for node v — the very string rpc.js's handleString
+   composes — and returns its length, or -1 when this side cannot answer for the node.
+   rpc.js's own tables (g.__rpcTables) are kept exactly as handleString keeps them: the
+   object's HID, byId, sent, infos, and the live count. idOut, when given, receives the id. */
+static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t *idOut) {
+    if (!JS_IsObject(cached_tables) || !cached_hid_atom) return -1;
+    const char *cls = rpc_node_cls(v, n);
+    if (!cls) return -1;
 
     JSValue sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
     JSValue infos = JS_GetPropertyStr(ctx, cached_tables, "infos");
     JSValue freeArr = JS_GetPropertyStr(ctx, cached_tables, "free");
     JSValue liveBox = JS_GetPropertyStr(ctx, cached_tables, "liveBox");
-    int done = 0;
+    int len = -1;
     if (JS_IsArray(sent) != 1 || JS_IsArray(infos) != 1 || JS_IsArray(freeArr) != 1 || !JS_IsObject(liveBox)) goto out;
     /* the id: the object's own HID, when byId still holds the object under it */
     int64_t id = -1;
@@ -572,9 +578,15 @@ static int rpc_answer_node(JSValueConst v, ND *n) {
     /* a recorded answer is reused as it stands */
     JSValue info = JS_GetPropertyUint32(ctx, infos, (uint32_t)id);
     if (JS_IsString(info)) {
-        set_result_value(info);
+        size_t n2;
+        const char *s = JS_ToCStringLen(ctx, &n2, info);
+        if (s && n2 <= cap) {
+            memcpy(buf, s, n2);
+            len = (int)n2;
+        }
+        if (s) JS_FreeCString(ctx, s);
         JS_FreeValue(ctx, info);
-        done = 1;
+        if (len >= 0 && idOut) *idOut = id;
         goto out;
     }
     JS_FreeValue(ctx, info);
@@ -609,29 +621,34 @@ static int rpc_answer_node(JSValueConst v, ND *n) {
         nnlen = (int)strlen(fixed);
         memcpy(nn, fixed, (size_t)nnlen);
     }
-    char buf[2000];
     size_t pos = 0;
     buf[pos++] = 'h';
     char num[24];
     int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
+    if (pos + (size_t)numlen > cap) goto out;
     memcpy(buf + pos, num, (size_t)numlen);
     pos += (size_t)numlen;
     buf[pos++] = 1;
     size_t clslen = strlen(cls);
+    if (pos + clslen > cap) goto out;
     memcpy(buf + pos, cls, clslen);
     pos += clslen;
     buf[pos++] = 1;
     numlen = snprintf(num, sizeof num, "%d", n->type);
+    if (pos + (size_t)numlen > cap) goto out;
     memcpy(buf + pos, num, (size_t)numlen);
     pos += (size_t)numlen;
     buf[pos++] = 1;
+    if (pos + (size_t)nnlen > cap) goto out;
     memcpy(buf + pos, nn, (size_t)nnlen);
     pos += (size_t)nnlen;
     if (n->type == 1) {
         buf[pos++] = 1;
+        if (pos + (size_t)n->taglen > cap) goto out;
         memcpy(buf + pos, n->tag, (size_t)n->taglen);
         pos += (size_t)n->taglen;
         buf[pos++] = 1;
+        if (pos + (size_t)nnlen > cap) goto out;
         memcpy(buf + pos, nn, (size_t)nnlen);
         pos += (size_t)nnlen;
     }
@@ -641,16 +658,98 @@ static int rpc_answer_node(JSValueConst v, ND *n) {
         goto out;
     }
     JS_SetPropertyUint32(ctx, infos, (uint32_t)id, JS_DupValue(ctx, ans));
-    set_result_value(ans);
     JS_FreeValue(ctx, ans);
-    done = 1;
+    if (idOut) *idOut = id;
+    len = (int)pos;
 out:
-    if (!done) JS_FreeValue(ctx, JS_GetException(ctx)); /* a half-kept book is handleString's to repair */
+    if (len < 0) JS_FreeValue(ctx, JS_GetException(ctx)); /* a half-kept book is handleString's to repair */
     JS_FreeValue(ctx, sent);
     JS_FreeValue(ctx, infos);
     JS_FreeValue(ctx, freeArr);
     JS_FreeValue(ctx, liveBox);
-    return done;
+    return len;
+}
+
+/* A node answer made here instead of by __reply (rpc.js: handleString), for a result of
+   the fast path below. Anything rpc_node_handle cannot answer returns 0 and __reply
+   answers as before. */
+static int rpc_answer_node(JSValueConst v, ND *n) {
+    char buf[2500];
+    int len = rpc_node_handle(v, n, buf, sizeof buf, NULL);
+    if (len < 1) return 0;
+    rpc_set_prefixed('h', buf + 1, (size_t)len - 1);
+    return 1;
+}
+
+/* The k request (the children of a node, elements only when asked) answered here, as the
+   'a' answer rpc.js's reply() composes for the same list. A child this side cannot name —
+   or a first pass that finds one — leaves the whole list to __rpc, untouched; handles
+   composed on the way to a failure have their sent counts put back, as reply()'s own
+   failure path puts them back. */
+static int rpc_answer_kids(ND *n, int elementsOnly) {
+    if (!JS_IsObject(cached_tables) || !cached_hid_atom) return -1;
+    size_t count = 0;
+    for (JSValue ch = n->first; !JS_IsNull(ch);) {
+        ND *cn = nd_of(ch);
+        if (!cn) return -1;
+        JSValue next = cn->next;
+        if (!elementsOnly || cn->type == 1) {
+            if (cn->type == 1 && cn->taglen >= 600) return -1;
+            if (!rpc_node_cls(ch, cn)) return -1;
+            count++;
+        }
+        ch = next;
+    }
+    if (count > 8192) return -1;
+    size_t cap = 1 << 16, pos = 0;
+    char *buf = malloc(cap);
+    int64_t *ids = malloc(sizeof(int64_t) * (count ? count : 1));
+    if (!buf || !ids) {
+        free(buf);
+        free(ids);
+        return -1;
+    }
+    size_t done = 0;
+    int ok = 1;
+    for (JSValue ch = n->first; !JS_IsNull(ch);) {
+        ND *cn = nd_of(ch);
+        if (!cn) { ok = 0; break; }
+        JSValue next = cn->next;
+        if (!elementsOnly || cn->type == 1) {
+            if (pos + 2501 > cap) {
+                size_t ncap = cap * 2;
+                char *nb = realloc(buf, ncap);
+                if (!nb) { ok = 0; break; }
+                buf = nb;
+                cap = ncap;
+            }
+            if (done) buf[pos++] = 2;
+            int64_t id = -1;
+            int len = rpc_node_handle(ch, cn, buf + pos, cap - pos, &id);
+            if (len < 0) { ok = 0; break; }
+            ids[done++] = id;
+            pos += (size_t)len;
+        }
+        ch = next;
+    }
+    if (ok) {
+        rpc_set_prefixed('a', buf, pos);
+    } else {
+        JSValue sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
+        if (JS_IsArray(sent) == 1) {
+            for (size_t i = 0; i < done; i++) {
+                JSValue sv = JS_GetPropertyUint32(ctx, sent, (uint32_t)ids[i]);
+                int64_t s = 0;
+                JS_ToInt64(ctx, &s, sv);
+                JS_FreeValue(ctx, sv);
+                if (s > 0) JS_SetPropertyUint32(ctx, sent, (uint32_t)ids[i], JS_NewInt64(ctx, s - 1));
+            }
+        }
+        JS_FreeValue(ctx, sent);
+    }
+    free(buf);
+    free(ids);
+    return ok ? 0 : -1;
 }
 
 /* the answer for value v (consumed): primitives here, an object through __reply */
@@ -706,6 +805,26 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
     JSValue byid = cached_byid;
     int rc = -1;
     char kind = len > 0 ? req[0] : 0;
+    if (kind == 'k' && len > 3 && JS_IsObject(byid)) {
+        /* k<id>\1<elements only: 0|1>: the children of a node, answered here when every
+           child is a node this side can name; anything else takes the slow way */
+        const char *sep = memchr(req + 1, 1, len - 1);
+        if (sep && sep + 2 == req + len && (sep[1] == '0' || sep[1] == '1') && sep > req + 1) {
+            uint32_t id = 0;
+            int okid = 1;
+            for (const char *p = req + 1; p < sep; p++) {
+                if (*p < '0' || *p > '9') { okid = 0; break; }
+                id = id * 10 + (uint32_t)(*p - '0');
+            }
+            if (okid) {
+                JSValue obj = JS_GetPropertyUint32(ctx, byid, id);
+                ND *kn = JS_IsObject(obj) ? nd_of(obj) : NULL;
+                if (kn) rc = rpc_answer_kids(kn, sep[1] == '1');
+                JS_FreeValue(ctx, obj);
+                if (rc >= 0) goto slow;
+            }
+        }
+    }
     if (len > 3 && (kind == 'g' || kind == 'c' || kind == 'v' || kind == 's') && JS_IsFunction(ctx, reply_fn) && JS_IsFunction(ctx, error_fn) && JS_IsObject(byid)) {
         const char *sep1 = memchr(req + 1, 1, len - 1);
         const char *sep2 = (kind == 'c' || kind == 'v' || kind == 's') && sep1 ? memchr(sep1 + 1, 1, (size_t)(req + len - sep1 - 1)) : NULL;

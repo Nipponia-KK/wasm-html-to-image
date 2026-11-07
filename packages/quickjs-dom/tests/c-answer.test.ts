@@ -90,3 +90,61 @@ describe("node answers made in C", () => {
     expect(dom.bridge().liveHandles()).toBeGreaterThanOrEqual(before + 2);
   });
 });
+
+describe("children answers made in C (the k request)", () => {
+  it("a mixed child list answers with the right nodes, classes and wrappers", async () => {
+    const dom2 = await createDOM(
+      { html: "<!doctype html><body><div id=p>lead<span id=s1>a</span><!--c--><input id=i1><p>tail</p></div></body>" },
+      { settleMs: 0 },
+    );
+    try {
+      const w2 = dom2.bridge().window;
+      const d2 = w2.document;
+      const p = d2.getElementById("p");
+      const kids = p.childNodes;
+      expect(kids.length).toBe(5);
+      expect(kids[0].nodeType).toBe(3);
+      expect(kids[0].data).toBe("lead");
+      expect(kids[1]).toBe(d2.getElementById("s1"));
+      expect(kids[1] instanceof w2.HTMLSpanElement).toBe(true);
+      expect(kids[2].nodeType).toBe(8);
+      expect(kids[3] instanceof w2.HTMLInputElement).toBe(true);
+      expect(kids[4].tagName).toBe("P");
+      const els = p.children;
+      expect(els.length).toBe(3);
+      expect(els[0]).toBe(kids[1]);
+      expect(els[1]).toBe(kids[3]);
+      expect(els[2]).toBe(kids[4]);
+      // the collection stays live: a page-side change is re-read
+      const extra = d2.createElement("b");
+      p.appendChild(extra);
+      expect(p.childNodes.length).toBe(6);
+      expect(p.childNodes[5]).toBe(extra);
+      expect(p.children.length).toBe(4);
+    } finally {
+      dom2.close();
+    }
+  });
+
+  it("fragments, empty elements and a long flat list answer whole", () => {
+    const f = d.createDocumentFragment();
+    f.appendChild(d.createElement("i"));
+    f.appendChild(d.createTextNode("t"));
+    expect(f.childNodes.length).toBe(2);
+    expect(f.childNodes[1].nodeType).toBe(3);
+    expect(d.createElement("div").childNodes.length).toBe(0);
+    expect(d.createElement("div").children.length).toBe(0);
+    const big = d.createElement("div");
+    const made: unknown[] = [];
+    for (let i = 0; i < 300; i++) {
+      const s = d.createElement("span");
+      big.appendChild(s);
+      made.push(s);
+    }
+    const bk = big.childNodes;
+    expect(bk.length).toBe(300);
+    expect(bk[0]).toBe(made[0]);
+    expect(bk[299]).toBe(made[299]);
+    expect(bk[150] instanceof w.HTMLSpanElement).toBe(true);
+  });
+});

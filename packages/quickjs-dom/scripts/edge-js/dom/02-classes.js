@@ -174,79 +174,29 @@
   });
 
   // ---- unknown elements, dialog, slot distribution -------------------------------------------
-  // The C layer gives every tag without an interface the plain HTMLElement prototype. The
-  // HTMLUnknownElement distinction is therefore made after creation (the parser, createElement,
-  // cloneNode and importNode all pass through the two helpers below): a tag the HTML spec does not
-  // define, and that is not a valid custom-element name, answers HTMLUnknownElement as in browsers.
+  // A tag the HTML spec defines without a dedicated interface gets the plain HTMLElement prototype,
+  // while a tag the HTML spec does not define (and that is not a valid custom-element name) gets
+  // HTMLUnknownElement directly from C (`nd_new`).
   // Declarative shadow DOM stays out of scope (a <template shadowrootmode> is a plain template).
   var XHTML_NS = "http://www.w3.org/1999/xhtml";
-  var KNOWN_HTML_TAGS = Object.create(null);
   ("a abbr acronym address applet area article aside audio b base basefont bdi bdo big blockquote body br button canvas caption " +
    "center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed fieldset figcaption figure font " +
    "footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe image img input ins isindex kbd keygen label " +
    "legend li link listing main map mark marquee menu menuitem meta meter nav nobr noembed noframes noscript object ol optgroup " +
    "option output p param picture plaintext pre progress q rb rp rt rtc ruby s samp script search section select slot small source " +
    "spacer span strike strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track tt u ul " +
-   "var video wbr xmp").split(" ").forEach(function (n) { KNOWN_HTML_TAGS[n] = true; });
-  var isUnknownElement = function (el) {
-    // cheapest answers first: the namespace walk is the dear one, and only an element that is
-    // not a known tag, not a custom-element name and on the plain HTMLElement prototype can be
-    // unknown at all, so it is asked last and only for those (createElement runs this per node)
-    if (!el || el.nodeType !== 1) return false;
-    if (Object.getPrototypeOf(el) !== P.HTMLElement) return false;
-    var name = el.localName;
-    if (KNOWN_HTML_TAGS[name] || name.indexOf("-") >= 0) return false;
-    return el.namespaceURI === XHTML_NS;
-  };
-  var fixUnknown = function (root) {
-    if (!root) return;
-    if (root.nodeType === 1 && isUnknownElement(root)) Object.setPrototypeOf(root, P.HTMLUnknownElement);
-    // createElement makes a childless element: there is nothing below it to classify, and asking for
-    // its descendants would be a scan per created node (the host-driven build's shape)
-    if (!root.firstChild || !root.getElementsByTagName) return;
-    var all = root.getElementsByTagName("*");
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i], name = el.localName;
-      if (KNOWN_HTML_TAGS[name] || name.indexOf("-") >= 0) continue;
-      if (isUnknownElement(el)) Object.setPrototypeOf(el, P.HTMLUnknownElement);
-    }
-  };
-  var rawCreateElement = P.Document.createElement;
-  def(P.Document, "createElement", function () {
-    var el = rawCreateElement.apply(this, arguments);
-    fixUnknown(el);
-    return el;
+   "var video wbr xmp").split(" ").forEach(function (n) {
+    if (Object.getPrototypeOf(D.createDocument().createElement(n)) === P.HTMLElement) D.setTagProto(n, P.HTMLElement);
   });
+  D.setTagProto("*", P.HTMLUnknownElement);
   var rawCreateElementNS = P.Document.createElementNS;
   def(P.Document, "createElementNS", function (ns, name) {
     var el = rawCreateElementNS.apply(this, arguments);
-    if (!ns || ns === XHTML_NS) fixUnknown(el);
     // createElementNS runs the plain factory first, so a foreign unknown tag would have been
     // classified as HTML: it is a generic Element in SVG/MathML.
-    else if (Object.getPrototypeOf(el) === P.HTMLUnknownElement) Object.setPrototypeOf(el, P.Element);
+    if (ns && ns !== XHTML_NS && Object.getPrototypeOf(el) === P.HTMLUnknownElement) Object.setPrototypeOf(el, P.Element);
     return el;
   });
-  var rawCloneNode = P.Node.cloneNode;
-  def(P.Node, "cloneNode", function () {
-    var node = rawCloneNode.apply(this, arguments);
-    fixUnknown(node);
-    return node;
-  });
-  var rawImportNode = P.Document.importNode;
-  def(P.Document, "importNode", function () {
-    var node = rawImportNode.apply(this, arguments);
-    fixUnknown(node);
-    return node;
-  });
-  // the element innerHTML setter is native (01-core.js only wraps its raw-text branch), so its
-  // parsed children need the same pass
-  var rawInnerHTML = Object.getOwnPropertyDescriptor(P.Element, "innerHTML");
-  if (rawInnerHTML && rawInnerHTML.set) {
-    getter(P.Element, "innerHTML", rawInnerHTML.get, function (v) {
-      rawInnerHTML.set.call(this, v);
-      fixUnknown(this);
-    });
-  }
 
   // Slot distribution: the assignment is computed from the flat tree as it is now (it is not
   // cached), so appending a child, changing its slot attribute or adding a slot is visible at once.
@@ -501,15 +451,7 @@
   D.parse = function (markup) {
     var doc = rawParse(markup);
     fixStructure(doc);
-    fixUnknown(doc);
     return doc;
-  };
-  // innerHTML, insertAdjacentHTML and the other fragment parses use this path too
-  var rawParseFragment = D.parseFragment;
-  D.parseFragment = function (markup, doc) {
-    var frag = rawParseFragment(markup, doc);
-    fixUnknown(frag);
-    return frag;
   };
   var DOMParser = function DOMParser() {};
   // A small strict XML parser for DOMParser's XML types. The HTML parser cannot serve them (it

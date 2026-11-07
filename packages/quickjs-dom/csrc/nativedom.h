@@ -37,8 +37,9 @@ static JSClassID nd_class_id;
 static long nd_version; /* bumped by every change to a tree or an attribute: live collections re-read when it moves */
 static long nd_live; /* nodes alive: tests check that dropped trees are really freed */
 static JSValue nd_protos[NP_COUNT];
+static JSValue nd_unknown_proto = JS_UNDEFINED;
 /* prototypes of the elements with a class of their own (HTMLInputElement for input, ...), registered by nativedom.js */
-#define ND_TAG_HASH_SIZE 256
+#define ND_TAG_HASH_SIZE 512
 #define ND_TAG_HASH_MASK (ND_TAG_HASH_SIZE - 1)
 static struct { char tag[16]; int len; JSValue proto; } nd_tag_protos[ND_TAG_HASH_SIZE];
 static int nd_ntag_protos;
@@ -122,6 +123,7 @@ static JSValue nd_new(JSContext *c, JSValueConst owner, int type, const char *ta
     if (type == 1 && tag && taglen > 0) {
         JSValue custom_proto = nd_lookup_tag_proto(tag, (int)taglen);
         if (!JS_IsUndefined(custom_proto)) proto = custom_proto;
+        else if (!JS_IsUndefined(nd_unknown_proto) && !memchr(tag, '-', taglen)) proto = nd_unknown_proto;
     }
     JSValue obj = JS_NewObjectProtoClass(c, proto, nd_class_id);
     if (JS_IsException(obj)) return obj;
@@ -719,6 +721,11 @@ static JSValue nd_build(JSContext *c, HP *p, JSValueConst root, JSValueConst own
             }
             JSValue node = nd_new(c, owner, 1, name, (size_t)namelen, 0);
             if (JS_IsException(node)) { free(b.st); free(b.afe); return node; }
+            if (foreign && !JS_IsUndefined(nd_unknown_proto)) {
+                JSValue pproto = JS_GetPrototype(c, node);
+                if (JS_VALUE_GET_PTR(pproto) == JS_VALUE_GET_PTR(nd_unknown_proto)) JS_SetPrototype(c, node, nd_protos[NP_ELEMENT]);
+                JS_FreeValue(c, pproto);
+            }
             ND *nn = nd_of(node);
             /* HTML attribute names are lower case (onClick is onclick); inside <svg> and <math> they keep their case (viewBox) */
             int fold = !foreign;

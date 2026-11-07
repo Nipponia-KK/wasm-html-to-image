@@ -255,16 +255,18 @@
   });
 
   // EventTarget: listeners per node, dispatch through the capture / target / bubble phases along the parent chain
-  var LISTENERS = new WeakMap();
+  var LISTENERS = Symbol("listeners");
   var listenerOptions = function (o) {
     return typeof o === "boolean" ? { capture: o } : o && typeof o === "object" ? o : {};
   };
   var addListener = function (type, fn, opts) {
     if (fn == null) return;
     opts = listenerOptions(opts);
-    var all = LISTENERS.get(this);
-    if (!all) LISTENERS.set(this, (all = {}));
+    var all = this[LISTENERS] || (this[LISTENERS] = {});
     var list = all[type] || (all[type] = []), capture = !!opts.capture, idx = list.idx, same, i;
+    if (!list.length && this[HANDLER] && this[HANDLER][type] !== undefined) {
+      list.push({ handler: true, capture: false, once: false, passive: false, removed: false });
+    }
     // an index by function keeps the duplicate check (and removal) from walking a list of thousands; a short list, which
     // nearly every one is (React adds one per event type to each root), is walked, without the cost of a Map for each
     if (idx) {
@@ -291,7 +293,7 @@
   };
   var removeListener = function (type, fn, opts) {
     if (fn == null) return; // an on* handler's slot has no function, and is not this one
-    var all = LISTENERS.get(this), list = all && all[type], capture = !!listenerOptions(opts).capture;
+    var all = this[LISTENERS], list = all && all[type], capture = !!listenerOptions(opts).capture;
     if (!list) return;
     if (!list.idx) {
       for (var n = 0; n < list.length; n++) if (list[n].fn === fn && list[n].capture === capture && !list[n].removed) { list[n].removed = true; return; }
@@ -322,24 +324,37 @@
   // read from a content attribute — and keeps that slot when set to null and back, the null
   // simply leaving the slot inert. ensureHandlerEntry claims the slot.
   var ensureHandlerEntry = function (node, type) {
-    var all = LISTENERS.get(node);
-    if (!all) LISTENERS.set(node, (all = {}));
+    var all = node[LISTENERS] || (node[LISTENERS] = {});
     var list = all[type] || (all[type] = []);
     for (var i = 0; i < list.length; i++) if (list[i].handler) return;
     list.push({ handler: true, capture: false, once: false, passive: false, removed: false });
   };
   var invoke = function (node, ev, phase, seenTarget, onType) {
+    var all = node[LISTENERS], list = all && all[ev.type];
+    var hfn = phase !== 1 && !list && node[HANDLER] && node[HANDLER][ev.type];
     // an attribute handler claims its slot the first time a dispatch reaches its node
-    if (phase !== 1 && node.nodeType === 1 && node.hasAttribute && node.hasAttribute(onType)) ensureHandlerEntry(node, ev.type);
-    var all = LISTENERS.get(node), list = all && all[ev.type];
+    if (phase !== 1 && hfn === undefined && !list && node.nodeType === 1 && node.hasAttribute && node.hasAttribute(onType)) {
+      ensureHandlerEntry(node, ev.type);
+      all = node[LISTENERS];
+      list = all && all[ev.type];
+    } else if (phase !== 1 && list && node.nodeType === 1 && !(node[HANDLER] && node[HANDLER][ev.type] !== undefined) && node.hasAttribute && node.hasAttribute(onType)) {
+      ensureHandlerEntry(node, ev.type);
+    }
     // a node with no listener for the type runs nothing and shows nothing (every node that does sets the event's
     // currentTarget and phase itself, and dispatch resets them at the end); only an object that is not a node may
     // still have an on<type> property of its own (below)
-    if (!list && node.nodeType !== undefined) return;
+    if (!list && !hfn && node.nodeType !== undefined) return;
     ev.currentTarget = node;
     ev.eventPhase = phase;
     if (seenTarget) { ev.target = seenTarget; ev.srcElement = seenTarget; }
     var sawHandler = false;
+    if (hfn && !list) {
+      sawHandler = true;
+      if (typeof hfn === "function") {
+        try { hfn.call(node, ev); } catch (e) { if (globalThis.console) globalThis.console.error(e); }
+      }
+      return;
+    }
     if (list) {
       list = list.slice();
       // (at the target the list runs in registration order: jsdom runs capture listeners first
@@ -416,7 +431,7 @@
     var type = ev.type, onType = "on" + type;
     for (i = path.length - 1; i > 0 && !ev.cancelBubble; i--) {
       // the capture pass has nothing to run on a node that listens for no event of this type
-      var held = LISTENERS.get(path[i]);
+      var held = path[i][LISTENERS];
       if (held && held[type]) invoke(path[i], ev, 1, seen ? seen[i] : this, onType);
       else if (path[i].nodeType === undefined) invoke(path[i], ev, 1, seen ? seen[i] : this, onType);
     }
@@ -1389,8 +1404,10 @@
         (this[HANDLER] || (this[HANDLER] = {}))[type] = fn;
         return fn;
       }, function (v) {
-        (this[HANDLER] || Object.defineProperty(this, HANDLER, { value: {}, configurable: true })[HANDLER])[type] = typeof v === "function" ? v : null;
-        if (typeof v === "function") ensureHandlerEntry(this, type);
+        var h = this[HANDLER] || (this[HANDLER] = {});
+        var fn = typeof v === "function" ? v : null;
+        h[type] = fn;
+        if (fn && this[LISTENERS] && this[LISTENERS][type]) ensureHandlerEntry(this, type);
       });
     });
   };

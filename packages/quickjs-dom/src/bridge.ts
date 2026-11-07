@@ -6,8 +6,11 @@
  * (scripts/edge-js/rpc.js). The same node is always the same wrapper; a wrapper that is collected tells the guest to
  * let go of its node. A function given to the page (an event listener) is called back from the guest, at once.
  */
+import { types } from "node:util";
 import type { EvalResult } from "./runtime.js";
 import { normalizeTimeout } from "./timeout.js";
+
+const EMPTY_FN_RE = /^(?:function\s*[\w$]*\s*\(\s*\)|\(\s*\)\s*=>)\s*\{\s*\}$/;
 
 /** What the bridge needs of a QuickJS instance. */
 export interface BridgeVM {
@@ -42,6 +45,10 @@ interface Cell {
   t?: number;
   /** the page-code generation (Bridge.codeGen) at which this element, made by createElement, was known to have no children and nothing since touched it */
   ek?: number;
+  /** the tree generation (Bridge.treeGen) at which this element was set to a single text child via non-empty textContent */
+  st?: number;
+  /** whether this wrapper is currently in Bridge.pinned */
+  pinned?: boolean;
   n?: string;
   /** localName and tagName of an element: they never change, so they come with the handle. */
   l?: string;
@@ -61,6 +68,9 @@ interface Cell {
   key?: string;
   /** The host defined a getter or setter on this wrapper: a write must reach it with the wrapper as `this`. */
   ownAccessor?: boolean;
+  /** Lazy event property bundle received with a callback argument, valid for generation `evg` (`Bridge.treeGen`). */
+  evb?: string;
+  evg?: number;
 }
 
 /** A handle as the guest sends it. */
@@ -167,7 +177,25 @@ const TAG_INTERFACES: Record<string, string> = {
   mod: "HTMLModElement",
   ins: "HTMLModElement",
   del: "HTMLModElement",
+  thead: "HTMLTableSectionElement",
+  tbody: "HTMLTableSectionElement",
+  tfoot: "HTMLTableSectionElement",
+  colgroup: "HTMLTableColElement",
+  datalist: "HTMLDataListElement",
+  dir: "HTMLDirectoryElement",
+  frame: "HTMLFrameElement",
+  frameset: "HTMLFrameSetElement",
+  marquee: "HTMLMarqueeElement",
 };
+const KNOWN_HTML_TAGS = new Set([
+  ...Object.keys(TAG_INTERFACES),
+  "abbr", "address", "article", "aside", "b", "bdi", "bdo", "cite", "code", "dd", "dfn", "dt", "em",
+  "figcaption", "figure", "footer", "header", "hgroup", "i", "kbd", "main", "mark", "nav", "noscript",
+  "rp", "rt", "ruby", "s", "samp", "search", "section", "small", "strong", "sub", "summary", "sup",
+  "u", "var", "wbr", "acronym", "applet", "basefont", "bgsound", "big", "blink", "center", "font",
+  "isindex", "keygen", "listing", "menuitem", "multicol", "nextid", "nobr", "noembed", "noframes",
+  "param", "plaintext", "rb", "rtc", "spacer", "strike", "tt", "xmp",
+]);
 /** Calls a transaction may queue: they build or rearrange the tree, set attributes, or register listeners, and
  * either answer nothing or a node among their arguments. (toggleAttribute is absent: it answers a boolean the
  * host cannot know before the page does.) */
@@ -455,6 +483,8 @@ export class Bridge {
   private readonly handlers = new Map<string, unknown>();
   /** Counts the times page code may have run (see invalidate): what was known of a node's children is good within one. */
   private codeGen = 0;
+  /** Counts the times the tree structure may have changed (see invalidate). */
+  private treeGen = 0;
   /** Whether the page has custom elements (their callbacks run page code on an attribute change): 0 = ask, 1 = none, 2 = yes (final). */
   private ce = 0;
   private readonly customElements = new WeakMap<object, Function>();
@@ -490,6 +520,7 @@ export class Bridge {
     const bridge = this;
     this.classProxyHandler = {
       get(t, k, r) {
+        if (k === HANDLE) return (t as any)[HANDLE];
         if (k in t) return Reflect.get(t, k, r);
         const cell = (t as any)[HANDLE] as Cell;
         return typeof k === "string" && !bridge.hidden.has(k) ? bridge.get(cell, k) : undefined;
@@ -499,11 +530,15 @@ export class Bridge {
           // An own data property (React's props on a node, written on every commit). With the proxy as the receiver,
           // Reflect.set would go through the defineProperty trap below; an object inheriting from the wrapper must.
           const cell = (t as any)[HANDLE] as Cell;
-          if (!cell.ownAccessor && Object.hasOwn(t, k) && bridge.wrappers.get(cell.id)?.deref() === r) return Reflect.set(t, k, v, t);
+          if (!cell.ownAccessor && Object.hasOwn(t, k) && (cell.self === r || bridge.wrappers.get(cell.id)?.deref() === r)) {
+            (t as any)[k] = v;
+            return true;
+          }
           return Reflect.set(t, k, v, r);
         }
         bridge.pin(r);
-        return Reflect.set(t, k, v, t);
+        (t as any)[k] = v;
+        return true;
       },
       has(t, k) {
         return Reflect.has(t, k);
@@ -511,8 +546,8 @@ export class Bridge {
       // what the host defines stays on this wrapper, so the wrapper must stay (as for a set)
       defineProperty(t, k, d) {
         const cell = (t as any)[HANDLE] as Cell;
-        if (d.get || d.set) cell.ownAccessor = true;
-        bridge.pin(bridge.wrappers.get(cell.id)?.deref() ?? t);
+        if (d.get || d.set || d.writable === false) cell.ownAccessor = true;
+        bridge.pin((cell.self as object | undefined) ?? bridge.wrappers.get(cell.id)?.deref() ?? t);
         return Reflect.defineProperty(t, k, d);
       },
     };
@@ -520,6 +555,7 @@ export class Bridge {
     this.indexedClassProxyHandler = {
       ...this.classProxyHandler,
       get(t, k, r) {
+        if (k === HANDLE) return (t as any)[HANDLE];
         const cell = (t as any)[HANDLE] as Cell;
         if (typeof k === "string" && INDEX.test(k)) return bridge.get(cell, k);
         if (k in t) return Reflect.get(t, k, r);
@@ -577,6 +613,11 @@ export class Bridge {
    * removed nodes would ever be freed, in the host or in the page.
    */
   private pin(wrapper: object): void {
+    const cell = (wrapper as any)[HANDLE] as Cell | undefined;
+    if (cell) {
+      if (cell.pinned) return;
+      cell.pinned = true;
+    }
     this.pinned.add(wrapper);
     if (this.pinned.size >= this.pinLimit && !this.txn && !this.pinSweeping && !this.closed) this.sweepPinned();
   }
@@ -584,21 +625,26 @@ export class Bridge {
   private sweepPinned(): void {
     this.pinSweeping = true;
     try {
-      const byId = new Map<number, object[]>();
+      const byId = new Map<number, object>();
       for (const w of this.pinned) {
         const cell = (w as any)[HANDLE] as Cell | undefined;
         if (!cell || cell.pending || cell.dead || typeof cell.id !== "number") continue;
-        const list = byId.get(cell.id);
-        if (list) list.push(w);
-        else byId.set(cell.id, [w]);
+        byId.set(cell.id, w);
       }
       if (byId.size) {
-        for (const id of this.sendJ(["detached", [...byId.keys()]]) as number[]) for (const w of byId.get(id) ?? []) this.pinned.delete(w);
+        for (const id of this.sendJ(["detached", [...byId.keys()]]) as number[]) {
+          const w = byId.get(id);
+          if (w) {
+            const c = (w as any)[HANDLE] as Cell | undefined;
+            if (c) c.pinned = false;
+            this.pinned.delete(w);
+          }
+        }
       }
     } finally {
       this.pinSweeping = false;
       // the next sweep when the pinned set has doubled since this one: the cost stays proportional to what is added
-      this.pinLimit = Math.max(1024, this.pinned.size * 2);
+      this.pinLimit = Math.max(this.pinLimit * 2, this.pinned.size * 2);
     }
   }
 
@@ -614,6 +660,7 @@ export class Bridge {
 
   /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
   invalidate(keepCe = false, keepOd = false): void {
+    this.treeGen++;
     if (this.reads.size) this.reads.clear();
     if (this.setMemo.size) this.setMemo.clear();
     if (this.styleObjs.size) this.styleObjs.clear();
@@ -625,10 +672,12 @@ export class Bridge {
       // page code may have replaced what these answered; attribute-only and tree-only changes cannot
       if (this.stableReads.size) this.stableReads.clear();
       this.codeGen++;
+      this.odGen++;
+    } else if (!keepOd) {
+      // what a node's ownerDocument was (`Cell.od`) is good until a node may have moved to another document
+      this.odGen++;
     }
     if (!keepCe && this.ce === 1) this.ce = 0;
-    // what a node's ownerDocument was (`Cell.od`) is good until a node may have moved to another document
-    if (!keepOd) this.odGen++;
   }
   /** The generation of the ownerDocument answers kept in the cells; a change that may move a node between documents ends it. */
   private odGen = 0;
@@ -756,8 +805,6 @@ export class Bridge {
     const lines = linesText === "" ? [] : linesText.split("\u0005");
     let li = 0;
     ops.forEach((op, i) => {
-      if (op.kind === "set") return;
-      const line = lines[li++];
       if (op.kind !== "create" || !op.placeholder) return;
       if (failedAt >= 0 && i >= failedAt) {
         op.placeholder.cell.dead = true;
@@ -771,13 +818,16 @@ export class Bridge {
         op.placeholder.cell.g = undefined;
         op.placeholder.cell.u = undefined;
         op.placeholder.cell.c = undefined;
-      } else if (line && line !== "-") {
-        this.adoptPlaceholder(op.placeholder, line);
-        // the node exists in the page now: the fresh-node derivations and the shadow child
-        // list (maintained only while the parent is unmade) no longer describe it. Its
-        // parentOf entry and the queued-write records stay — those are kept for every op.
-        state.fresh.delete(op.placeholder.cell);
-        state.kids.delete(op.placeholder.cell);
+      } else {
+        const line = lines[li++];
+        if (line && line !== "-") {
+          this.adoptPlaceholder(op.placeholder, line);
+          // the node exists in the page now: the fresh-node derivations and the shadow child
+          // list (maintained only while the parent is unmade) no longer describe it. Its
+          // parentOf entry and the queued-write records stay — those are kept for every op.
+          state.fresh.delete(op.placeholder.cell);
+          state.kids.delete(op.placeholder.cell);
+        }
       }
     });
     if (failedAt >= 0) throw new Error(`quickjs-dom: transaction failed at operation ${failedAt}: ${failMessage}`);
@@ -870,7 +920,9 @@ export class Bridge {
       if (ns === "" || ns === "http://www.w3.org/1999/xhtml") {
         n = g = local.toUpperCase();
         clsName = TAG_INTERFACES[l] ?? "HTML" + l.charAt(0).toUpperCase() + l.slice(1) + "Element";
-        if (!this.classes.has(clsName) && !this.schemaByName.has(clsName)) clsName = "HTMLElement";
+        if (!this.classes.has(clsName) && !this.schemaByName.has(clsName)) {
+          clsName = !l.includes("-") && !KNOWN_HTML_TAGS.has(l) ? "HTMLUnknownElement" : "HTMLElement";
+        }
       } else if (ns === "http://www.w3.org/2000/svg") {
         n = g = name;
         clsName = "SVGElement";
@@ -1235,11 +1287,16 @@ export class Bridge {
   private sendJ(request: unknown[]): unknown {
     // anything else the host asks the page for sees the page after the transaction's queue
     if (this.txn && request[0] !== "txn" && request[0] !== "release") this.flushTxn();
+    if (request[0] === "txn") {
+      const value = this.send("t" + (request[1] as string), false);
+      this.invalidate(this.ce === 1);
+      return value;
+    }
     // a function of the page that is called, an object made, or a batch run, may change anything (except
     // getComputedStyle, which the host marked when it read the function: it computes and returns an object)
     const runs =
       request[0] === "construct" ||
-      request[0] === "new" ||
+      (request[0] === "new" && !(typeof request[1] === "string" && (request[1] === "Event" || request[1].endsWith("Event")))) ||
       request[0] === "del" ||
       request[0] === "batch" ||
       request[0] === "fire" ||
@@ -1433,6 +1490,7 @@ export class Bridge {
     // React asks every event target for this one (getEventTarget); only an SVG <use> has it, and for anything
     // else the property does not exist. Answering it here is the same answer the page would give, without a call.
     if (key === "correspondingUseElement" && cell.t === 1 && cell.l !== "use") return undefined;
+    if (key === "defaultView" && cell.t !== 9 && cell.t !== undefined) return undefined;
     if (key === "ownerDocument" && cell.t !== 9) {
       if (cell.odg === this.odGen && cell.od !== undefined) return cell.od;
       const value = this.send("g" + cell.id + "\u0001" + key);
@@ -1442,7 +1500,17 @@ export class Bridge {
       }
       return value;
     }
-    if (cell.ek === this.codeGen && !this.txn && (key === "firstChild" || key === "lastChild" || key === "firstElementChild" || key === "lastElementChild")) return null;
+    if (cell.ek === this.codeGen && !this.txn) {
+      if (key === "firstChild" || key === "lastChild" || key === "firstElementChild" || key === "lastElementChild") return null;
+      if (key === "childElementCount") return 0;
+    }
+    if (cell.st === this.treeGen && !this.txn) {
+      if (key === "firstElementChild" || key === "lastElementChild") return null;
+      if (key === "childElementCount") return 0;
+    }
+    if (cell.evg === this.treeGen && cell.evb !== undefined) {
+      this.unpackEventBundle(cell);
+    }
     const k = cell.id + "\u0001" + key;
     const style = key === "style" && cell.t === 1;
     const store = style ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : this.reads;
@@ -1450,7 +1518,25 @@ export class Bridge {
     const value = this.send("g" + cell.id + "\u0001" + key);
     if (store.size > 100000) store.clear();
     store.set(k, value);
+    if (cell.st === this.treeGen && !this.txn && (key === "firstChild" || key === "lastChild")) {
+      store.set(cell.id + "\u0001" + (key === "firstChild" ? "lastChild" : "firstChild"), value);
+    }
     return value;
+  }
+
+  private unpackEventBundle(cell: Cell): void {
+    const bundle = cell.evb;
+    cell.evb = undefined;
+    if (!bundle) return;
+    const prefix = cell.id + "\u0001";
+    const parts = bundle.split("\u0003");
+    for (let i = 0; i < parts.length; i++) {
+      const kv = parts[i];
+      const sep = kv.indexOf("\u0001");
+      if (sep > 0) {
+        this.reads.set(prefix + kv.slice(0, sep), this.decodeToken(kv.slice(sep + 1)));
+      }
+    }
   }
 
   /** The items of a list of the page (Testing Library goes through each input's `labels`), until the page changes. */
@@ -1490,7 +1576,14 @@ export class Bridge {
   private functionId(fn: Function): number {
     let id = this.fnIds.get(fn);
     if (id === undefined) {
-      id = this.nextFn++;
+      let isNoop = false;
+      try {
+        isNoop = !types.isProxy(fn) && Object.keys(fn).length === 0 && EMPTY_FN_RE.test(Function.prototype.toString.call(fn));
+      } catch {
+        isNoop = false;
+      }
+      id = this.nextFn * 2 + (isNoop ? 1 : 0);
+      this.nextFn++;
       this.fnIds.set(fn, id);
       this.fnById.set(id, fn);
     }
@@ -1530,7 +1623,11 @@ export class Bridge {
       }
     }
     if (cell.pending && !this.txn) throw new Error("quickjs-dom: this node's creation did not complete");
-    if (cell.ek !== undefined && !memoizable && !(cell.t === 1 && ON_HANDLER.test(key))) cell.ek = undefined;
+    const wasEmpty = cell.ek === this.codeGen && !this.txn;
+    if (!memoizable && !(cell.t === 1 && ON_HANDLER.test(key))) {
+      cell.ek = undefined;
+      cell.st = undefined;
+    }
     // inside a transaction, a state-only write is queued, not sent; the flush applies it.
     // textContent is queueable too, even though it is not a fine set on the direct path (it
     // replaces the node's children, so the direct path must invalidate structurally): inside
@@ -1586,14 +1683,22 @@ export class Bridge {
     } else if (cell.pending) {
       this.flushTxn();
     }
+    const emptyTextSet = wasEmpty && cell.t === 1 && key === "textContent" && (typeof value === "string" || value === null);
     if (
       (cell.t === 1
-        ? (FINE_SET_KEYS.has(key) || ON_HANDLER.test(key)) && cell.l !== "select"
+        ? ((FINE_SET_KEYS.has(key) || ON_HANDLER.test(key)) && cell.l !== "select") || emptyTextSet
         : cell.t === 3 || cell.t === 8
           ? TEXT_SET_KEYS.has(key)
           : cell.c === "CSSStyleDeclaration") &&
       this.fineOk()
-    ) this.invalidateAttrs();
+    ) {
+      this.invalidateAttrs();
+      if (emptyTextSet) {
+        const base = cell.id + "\u0001";
+        this.sreads.delete(base + "firstChild");
+        this.sreads.delete(base + "lastChild");
+      }
+    }
     // an assignment runs page code only through a custom element (`ce` says there is none), and moves a node to another
     // document only when it is given a node
     else this.invalidate(true, value === null || (typeof value !== "object" && typeof value !== "function") || !(value as any)[HANDLE]);
@@ -1605,6 +1710,15 @@ export class Bridge {
         this.send("s" + cell.id + "\u0001" + key + "\u0001" + (tok.charCodeAt(0) === 102 ? "\u0006" : "\u0004") + tok);
       } else {
         this.send("s" + cell.id + "\u0001" + key + "\u0001" + JSON.stringify(this.encode(value)));
+      }
+    }
+    if (cell.t === 1 && key === "textContent" && !this.txn && this.ce === 1) {
+      if (value === "" || value === null) {
+        cell.ek = this.codeGen;
+        cell.st = undefined;
+      } else if (typeof value === "string") {
+        cell.st = this.treeGen;
+        cell.ek = undefined;
       }
     }
     if (cell.t === 1 && typeof value === "function" && ON_HANDLER.test(key)) {
@@ -1727,12 +1841,15 @@ export class Bridge {
     } else if (cell.pending) {
       throw new Error("quickjs-dom: this node's creation did not complete");
     }
-    if (cell.ek !== undefined && !ATTR_CALLS.has(key) && !LISTENER_CALLS.has(key) && !PURE_CALLS.has(key)) cell.ek = undefined;
+    if (!ATTR_CALLS.has(key) && !LISTENER_CALLS.has(key) && !PURE_CALLS.has(key)) {
+      cell.ek = undefined;
+      cell.st = undefined;
+    }
     const encoded = this.encodeArgs(args);
     if (cell.t === 9 ? CREATE_CALLS.has(key) : cell.t === 1 ? ATTR_CALLS.has(key) || LISTENER_CALLS.has(key) : false) {
       // nothing that was read can have changed (a new node is in no tree, a listener is not read), or only an attribute did
       if (this.fineOk()) {
-        const value = this.send("c" + cell.id + "\u0001" + key + "\u0001" + encoded);
+        const value = this.send((cell.t === 9 || key === "toggleAttribute" ? "c" : "v") + cell.id + "\u0001" + key + "\u0001" + encoded);
         if (cell.t === 9) {
           // a node made by a document belongs to it
           const made = value && typeof value === "object" ? ((value as any)[HANDLE] as Cell | undefined) : undefined;
@@ -1756,9 +1873,19 @@ export class Bridge {
       }
     }
     if (!PURE_CALLS.has(key)) {
+      const knownNodeReturn =
+        cell.t === 1 || cell.t === 9 || cell.t === 11
+          ? (key === "appendChild" || key === "insertBefore" || key === "removeChild") && args.length >= 1 && !!(args[0] as any)?.[HANDLE]
+            ? args[0]
+            : key === "replaceChild" && args.length >= 2 && !!(args[0] as any)?.[HANDLE] && !!(args[1] as any)?.[HANDLE]
+              ? args[1]
+              : undefined
+          : undefined;
       // the drop after is what makes the calls that follow see the page's new state; dropping before as well
       // only threw away reads that were still good, so it is not done
-      const value = this.send("c" + cell.id + "\u0001" + key + "\u0001" + encoded);
+      const value = knownNodeReturn !== undefined
+        ? (this.send("v" + cell.id + "\u0001" + key + "\u0001" + encoded), knownNodeReturn)
+        : this.send("c" + cell.id + "\u0001" + key + "\u0001" + encoded);
       // a change of the tree runs page code only through a custom element (`ce` says there is none); it moves a node to
       // another document only when the receiver and a node it was given are not known to be of one document
       const tree = TREE_CALLS.has(key);
@@ -1853,6 +1980,7 @@ export class Bridge {
     if (h.c === "Function") w = this.functionWrapper(cell);
     else if (cls) w = this.classWrapper(cell, cls);
     else w = this.dynamicWrapper(cell, h.c === "Window");
+    cell.self = w;
     this.wrappers.set(h.i, new WeakRef(w));
     this.registry.register(w, cell);
     return w;
@@ -2039,10 +2167,18 @@ export class Bridge {
             }
           }
           const made = bridge.sendJ(["new", name, args.map((a) => bridge.encode(a))]) as object;
+          if ((name === "Event" || name.endsWith("Event")) && made && typeof made === "object") {
+            const ec = (made as any)[HANDLE] as Cell | undefined;
+            if (ec) {
+              const init = args[1] !== null && typeof args[1] === "object" ? (args[1] as Record<string, unknown>) : undefined;
+              if (init && "view" in init) bridge.reads.set(ec.id + "\u0001view", init.view ?? null);
+              else if (name !== "Event" && name !== "CustomEvent") bridge.reads.set(ec.id + "\u0001view", null);
+            }
+          }
           if (new.target !== cls && made && typeof made === "object") {
             // a subclass of the host's (class FakeList extends EventTarget): its members are on this wrapper, which must stay
             Object.setPrototypeOf(made, new.target.prototype);
-            bridge.pinned.add(made);
+            bridge.pin(made);
           }
           return made;
         },
@@ -2156,8 +2292,17 @@ export class Bridge {
         return Number(t.slice(1));
       case 115: // s
         return t.slice(1);
-      case 104: // h
-        return this.handleOf(t.slice(1));
+      case 104: { // h
+        const cut = t.indexOf("\u0003");
+        if (cut < 0) return this.handleOf(t.slice(1));
+        const obj = this.handleOf(t.slice(1, cut));
+        const cell = (obj as any)?.[HANDLE] as Cell | undefined;
+        if (cell) {
+          cell.evb = t.slice(cut + 1);
+          cell.evg = this.treeGen;
+        }
+        return obj;
+      }
       default:
         return undefined;
     }

@@ -497,10 +497,11 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
     JSValue error_fn = cached_error_fn;
     JSValue byid = cached_byid;
     int rc = -1;
-    if (len > 3 && (req[0] == 'g' || req[0] == 'c' || req[0] == 's') && JS_IsFunction(ctx, reply_fn) && JS_IsFunction(ctx, error_fn) && JS_IsObject(byid)) {
+    char kind = len > 0 ? req[0] : 0;
+    if (len > 3 && (kind == 'g' || kind == 'c' || kind == 'v' || kind == 's') && JS_IsFunction(ctx, reply_fn) && JS_IsFunction(ctx, error_fn) && JS_IsObject(byid)) {
         const char *sep1 = memchr(req + 1, 1, len - 1);
-        const char *sep2 = (req[0] == 'c' || req[0] == 's') && sep1 ? memchr(sep1 + 1, 1, (size_t)(req + len - sep1 - 1)) : NULL;
-        int ok = sep1 != NULL && (req[0] == 'g' || sep2 != NULL);
+        const char *sep2 = (kind == 'c' || kind == 'v' || kind == 's') && sep1 ? memchr(sep1 + 1, 1, (size_t)(req + len - sep1 - 1)) : NULL;
+        int ok = sep1 != NULL && (kind == 'g' || sep2 != NULL);
         uint32_t id = 0;
         if (ok) {
             for (const char *p = req + 1; p < sep1; p++) {
@@ -515,8 +516,8 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                 size_t keylen = (size_t)((req[0] == 'g' ? req + len : sep2) - key);
 
                 if (req[0] == 's') {
-                    /* Property set: s<id>\1<key>\1\3<string> or \4<token> */
-                    if (sep2 + 1 < req + len && (sep2[1] == 3 || sep2[1] == 4)) {
+                    /* Property set: s<id>\1<key>\1\3<string> or \4/\6<token> */
+                    if (sep2 + 1 < req + len && (sep2[1] == 3 || sep2[1] == 4 || sep2[1] == 6)) {
                         JSValue v = JS_UNDEFINED;
                         if (sep2[1] == 3) {
                             const char *val = sep2 + 2;
@@ -558,7 +559,7 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                 JSValue *argv = NULL;
                 uint32_t argc = 0;
                 int plain = 1;
-                if (req[0] == 'c' && sep2 + 1 < req + len && sep2[1] == 3) {
+                if ((req[0] == 'c' || req[0] == 'v') && sep2 + 1 < req + len && sep2[1] == 3) {
                     /* all arguments are strings: "\3" and the strings apart by "\2" */
                     const char *p = sep2 + 2, *end = req + len;
                     argc = 1;
@@ -573,8 +574,8 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                             p = stop + 1;
                         }
                     }
-                } else if (req[0] == 'c' && sep2 + 1 < req + len && sep2[1] == 4) {
-                    /* typed simple arguments: "\4" and tokens apart by "\2" */
+                } else if ((req[0] == 'c' || req[0] == 'v') && sep2 + 1 < req + len && (sep2[1] == 4 || sep2[1] == 6)) {
+                    /* typed simple arguments: "\4" or "\6" and tokens apart by "\2" */
                     const char *p = sep2 + 2, *end = req + len;
                     argc = 1;
                     for (const char *q = p; q < end; q++) if (*q == 2) argc++;
@@ -589,7 +590,7 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                             p = stop + 1;
                         }
                     }
-                } else if (req[0] == 'c' && sep2 + 1 < req + len) {
+                } else if ((req[0] == 'c' || req[0] == 'v') && sep2 + 1 < req + len) {
                     argv_arr = JS_ParseJSON(ctx, sep2 + 1, (size_t)(req + len - sep2 - 1), "<args>");
                     if (JS_IsException(argv_arr)) {
                         JS_FreeValue(ctx, JS_GetException(ctx));
@@ -617,7 +618,7 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                     goto slow;
                 }
                 JSAtom atom = JS_NewAtomLen(ctx, key, keylen);
-                JSValue v = req[0] == 'g' ? JS_GetProperty(ctx, obj, atom) : JS_Invoke(ctx, obj, atom, (int)argc, argv);
+                JSValue v = kind == 'g' ? JS_GetProperty(ctx, obj, atom) : JS_Invoke(ctx, obj, atom, (int)argc, argv);
                 JS_FreeAtom(ctx, atom);
                 for (uint32_t i = 0; i < argc && argv; i++) JS_FreeValue(ctx, argv[i]);
                 JS_FreeValue(ctx, argv_arr);
@@ -634,6 +635,10 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                         JS_FreeValue(ctx, out);
                         rc = 0;
                     }
+                } else if (kind == 'v') {
+                    JS_FreeValue(ctx, v);
+                    rpc_set_prefixed('U', "", 0);
+                    rc = 0;
                 } else {
                     rc = rpc_answer(v, reply_fn);
                 }

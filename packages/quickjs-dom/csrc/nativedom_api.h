@@ -830,6 +830,12 @@ static JSValue js_dom_set_tag_proto(JSContext *ctx, JSValueConst this_val, int a
     size_t len;
     const char *tag = JS_ToCStringLen(ctx, &len, argv[0]);
     if (!tag) return JS_EXCEPTION;
+    if (len == 1 && tag[0] == '*') {
+        if (!JS_IsUndefined(nd_unknown_proto)) JS_FreeValue(ctx, nd_unknown_proto);
+        nd_unknown_proto = JS_DupValue(ctx, argv[1]);
+        JS_FreeCString(ctx, tag);
+        return JS_UNDEFINED;
+    }
     if (len > 0 && len < 16 && nd_ntag_protos < ND_TAG_HASH_SIZE - 1) {
         uint32_t h = nd_tag_hash(tag, (int)len) & ND_TAG_HASH_MASK;
         for (int step = 0; step < ND_TAG_HASH_SIZE; step++) {

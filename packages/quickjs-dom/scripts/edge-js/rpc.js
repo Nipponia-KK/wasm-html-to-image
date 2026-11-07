@@ -5,6 +5,7 @@
   var D = g.__native.dom;
   // handle table: arrays by id (a Map keyed by small integers is slow in QuickJS), ids of let-go objects are reused
   var byId = [undefined], sent = [0], free = [], live = 0, byObj = new Map();
+  var HID = Symbol("hid"), PCLS = Symbol("pcls"), CCLS = Symbol("ccls");
   // id of a function of the host's -> the function that calls it from here. A plain object, not a Map: QuickJS hashes
   // the sequential integer ids of a Map badly (a set costs 2-4 us, ~20x an object's), and every new listener paid it.
   var callbacks = Object.create(null);
@@ -34,11 +35,13 @@
     "SVGPreserveAspectRatio", "SVGAnimatedPreserveAspectRatio"].forEach(function (k) { UNBRIDGED[k] = 1; });
 
   var collect = function () {
-    protoNames = new Map(); ctorNames = new Map(); ctorByName = new Map(); interfaces = [];
+    protoNames = new Map(); ctorNames = new Map(); ctorByName = Object.create(null); interfaces = [];
     var add = function (name, C) {
       if (typeof C !== "function" || !C.prototype || typeof C.prototype !== "object" || !/^[A-Z]/.test(name)) return; // window.getSelection is a function, not an interface
-      if (protoNames.has(C.prototype)) { ctorNames.set(C, protoNames.get(C.prototype)); return; } // a shim of an interface is that interface
-      protoNames.set(C.prototype, name); ctorNames.set(C, name); ctorByName.set(name, C); interfaces.push([name, C]);
+      if (protoNames.has(C.prototype)) { var pn = protoNames.get(C.prototype); ctorNames.set(C, pn); Object.defineProperty(C, CCLS, { value: pn, configurable: true }); return; } // a shim of an interface is that interface
+      protoNames.set(C.prototype, name); ctorNames.set(C, name); ctorByName[name] = C; interfaces.push([name, C]);
+      Object.defineProperty(C.prototype, PCLS, { value: name, configurable: true });
+      Object.defineProperty(C, CCLS, { value: name, configurable: true });
     };
     Object.keys(D.ctors).forEach(function (k) { add(k, D.ctors[k]); });
     Object.keys(D.window).forEach(function (k) { add(k, D.window[k]); });
@@ -85,17 +88,25 @@
   var classOf = function (v) {
     if (!protoNames) collect();
     for (var p = Object.getPrototypeOf(v); p; p = Object.getPrototypeOf(p)) {
-      var n = protoNames.get(p);
+      var n = Object.prototype.hasOwnProperty.call(p, PCLS) ? p[PCLS] : protoNames.get(p);
       if (n) return n;
     }
     return null;
   };
 
   var idFor = function (v) {
-    var id = byObj.get(v);
-    if (id === undefined) {
-      id = free.length ? free.pop() : byId.length;
-      byObj.set(v, id); byId[id] = v; sent[id] = 0; live++;
+    var id = v[HID];
+    if (id === undefined || byId[id] !== v) {
+      id = byObj.get(v);
+      if (id === undefined) {
+        id = free.length ? free.pop() : byId.length;
+        if (v !== g && typeof v === "object" && (!protoNames || !protoNames.has(v)) && !(D.CSSStyleDeclarationCtor && v instanceof D.CSSStyleDeclarationCtor)) {
+          try { v[HID] = id; } catch (e) { byObj.set(v, id); }
+        } else {
+          byObj.set(v, id);
+        }
+        byId[id] = v; sent[id] = 0; live++;
+      }
     }
     sent[id]++;
     return id;
@@ -120,19 +131,21 @@
     return tail;
   };
   // the handle of an object whose class is known, as a string; null for anything else
-  var handleString = function (v) {
-    var id = byObj.get(v);
+  var handleString = function (v, knownCls) {
+    var id = v[HID];
+    if (id === undefined || byId[id] !== v) id = byObj.get(v);
     if (id !== undefined && infos[id] !== undefined) {
       sent[id]++;
       // whole: the host may have lost its wrapper to GC before it told this side, and it builds a new one from this
       return infos[id];
     }
-    if (v === g || typeof v === "function") return null;
-    var cls = classOf(v);
+    if (v === g || typeof v === "function" || (protoNames && protoNames.has(v))) return null;
+    var cls = knownCls || classOf(v);
     if (cls === null) return null;
     if (id === undefined) {
       id = free.length ? free.pop() : byId.length;
-      byObj.set(v, id); byId[id] = v; sent[id] = 0; live++;
+      try { v[HID] = id; } catch (e) { byObj.set(v, id); }
+      byId[id] = v; sent[id] = 0; live++;
     }
     sent[id]++;
     return (infos[id] = "h" + id + tailOf(v, cls));
@@ -164,7 +177,7 @@
         // registry, say): it returns as the same function, not as a handle to its wrapper here
         if (typeof v.__hostFn === "number") return { $: "f", i: v.__hostFn };
         if (!ctorNames) collect();
-        return ctorNames.has(v) ? { $: "c", n: ctorNames.get(v) } : handle(v, true);
+        return Object.prototype.hasOwnProperty.call(v, CCLS) ? { $: "c", n: v[CCLS] } : ctorNames.has(v) ? { $: "c", n: ctorNames.get(v) } : handle(v, true);
       default:
         if (v === null) return null;
         if (Array.isArray(v)) return v.map(enc);
@@ -191,22 +204,69 @@
 
   // A value that goes to the host as a compact token without being looked at twice: a primitive, or an object whose own
   // interface is known (a node, an event). Nothing is numbered here, so a value that is not one costs nothing.
+  var EV_STATIC = Symbol("evStatic");
+  var EVENT_PROPS = ["type", "bubbles", "cancelable", "composed", "isTrusted", "timeStamp", "detail", "button", "buttons", "clientX", "clientY", "pageX", "pageY", "screenX", "screenY", "offsetX", "offsetY", "ctrlKey", "shiftKey", "altKey", "metaKey", "key", "code", "location", "repeat", "isComposing", "inputType", "data", "deltaX", "deltaY", "deltaZ", "deltaMode", "pointerId", "width", "height", "pressure", "pointerType", "isPrimary", "which", "keyCode", "charCode"];
+  var EVENT_REFS = ["target", "currentTarget", "srcElement", "relatedTarget", "view"];
+  var eventToken = function (ev, cls) {
+    var hs = handleString(ev, cls);
+    var st = ev[EV_STATIC];
+    if (st === undefined) {
+      var sparts = [];
+      for (var i = 0; i < EVENT_PROPS.length; i++) {
+        var k = EVENT_PROPS[i];
+        if (!(k in ev)) continue;
+        var v = ev[k], t = typeof v;
+        if (t === "boolean") sparts.push(k + SEP + (v ? "T" : "F"));
+        else if (t === "number") {
+          if (v === v && v !== Infinity && v !== -Infinity && !(v === 0 && 1 / v < 0)) sparts.push(k + SEP + "n" + v);
+        } else if (t === "string") {
+          if (v.indexOf(SEP) < 0 && v.indexOf("\u0002") < 0 && v.indexOf("\u0003") < 0) sparts.push(k + SEP + "s" + v);
+        } else if (v === null) {
+          sparts.push(k + SEP + "N");
+        }
+      }
+      st = ev[EV_STATIC] = sparts.join("\u0003");
+    }
+    var parts = st ? [hs, st, "defaultPrevented" + SEP + (ev.defaultPrevented ? "T" : "F"), "eventPhase" + SEP + "n" + ev.eventPhase] : [hs, "defaultPrevented" + SEP + (ev.defaultPrevented ? "T" : "F"), "eventPhase" + SEP + "n" + ev.eventPhase];
+    for (var j = 0; j < EVENT_REFS.length; j++) {
+      var rk = EVENT_REFS[j];
+      if (!(rk in ev)) continue;
+      var rv = ev[rk];
+      if (rv === null) parts.push(rk + SEP + "N");
+      else if (rv && typeof rv === "object" && rv !== g) {
+        var rhs = handleString(rv);
+        if (rhs !== null) parts.push(rk + SEP + rhs);
+      }
+    }
+    return parts.join("\u0003");
+  };
+  var plainProtoName = function (v) {
+    var p = Object.getPrototypeOf(v);
+    if (!p) return null;
+    if (Object.prototype.hasOwnProperty.call(p, PCLS)) return p[PCLS];
+    return protoNames !== null ? protoNames.get(p) || null : null;
+  };
   var plainTokenOk = function (v) {
     switch (typeof v) {
       case "undefined": case "boolean": return true;
       case "number": return v === v && v !== Infinity && v !== -Infinity && !(v === 0 && 1 / v < 0);
-      case "string": return v.indexOf(SEP) < 0 && v.indexOf("") < 0;
-      case "object": return v === null || (v !== g && protoNames !== null && protoNames.has(Object.getPrototypeOf(v)) && !Array.isArray(v) && !(v instanceof Date));
+      case "string": return v.indexOf(SEP) < 0 && v.indexOf("\u0002") < 0 && v.indexOf("\u0003") < 0;
+      case "object": return v === null || (v !== g && plainProtoName(v) !== null && !Array.isArray(v) && !(v instanceof Date));
       default: return false;
     }
   };
-  var plainToken = function (v) {
+  var plainToken = function (v, withEvent) {
     switch (typeof v) {
       case "undefined": return "U";
       case "boolean": return v ? "T" : "F";
       case "number": return "n" + v;
       case "string": return "s" + v;
-      default: return v === null ? "N" : handleString(v, protoNames.get(Object.getPrototypeOf(v)));
+      default: {
+        if (v === null) return "N";
+        var cls = plainProtoName(v);
+        if (withEvent && g.Event && v instanceof g.Event) return eventToken(v, cls);
+        return handleString(v, cls);
+      }
     }
   };
   var callHost = function (id, self, args) {
@@ -214,9 +274,9 @@
     for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
     if (plain) {
       // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
-      var ptoks = [plainToken(self)];
-      for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi]));
-      var preply = g.__host.callback(String(id), "" + ptoks.join(""));
+      var ptoks = [plainToken(self, false)];
+      for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
+      var preply = g.__host.callback(String(id), "\u0005" + ptoks.join("\u0002"));
       if (preply === undefined) throw new Error("the host has no function " + id);
       if (preply.charCodeAt(0) === 6) return tokenValue(preply.slice(1));
       var pr = JSON.parse(preply);
@@ -271,7 +331,7 @@
   var hostFunction = function (id) {
     var ref = callbacks[id], f = ref && ref.deref();
     if (!f) {
-      f = function () { return callHost(id, this, arguments); };
+      f = id & 1 ? function () {} : function () { return callHost(id, this, arguments); };
       f.__hostFn = id;
       callbacks[id] = new WeakRef(f);
     }
@@ -302,10 +362,10 @@
   };
   var ctorOf = function (name) {
     if (!ctorByName) collect();
-    var C = ctorByName.get(name);
+    var C = ctorByName[name];
     if (C) return C;
     // a name the schema does not know (a late global): search the interfaces once, then remember it
-    for (var i = 0; i < interfaces.length; i++) if (interfaces[i][0] === name) { C = interfaces[i][1]; ctorByName.set(name, C); return C; }
+    for (var i = 0; i < interfaces.length; i++) if (interfaces[i][0] === name) { C = interfaces[i][1]; ctorByName[name] = C; return C; }
     throw new Error("no interface " + name);
   };
   var decAll = function (list) { return list.map(dec); };
@@ -352,6 +412,64 @@
   };
   var release1 = function (s) { var end = s.indexOf(SEP), id = +(end < 0 ? s.slice(1) : s.slice(1, end)); if (sent[id] > 0) sent[id]--; };
   var json = function (v) { return new Raw("k" + JSON.stringify(v)); }; // plain data, not to be decoded
+
+  var runTxn = function (payload, compact) {
+    var records = String(payload).split("\u0005"), results = [], lines = [];
+    var token = function (tok) {
+      var tc = tok.charCodeAt(0);
+      if (tc === 78) return null;
+      if (tc === 84) return true;
+      if (tc === 70) return false;
+      if (tc === 110) return +tok.slice(1);
+      if (tc === 115) return tok.slice(1);
+      if (tc === 104) return target(+tok.slice(1));
+      if (tc === 102) return hostFunction(+tok.slice(1));
+      if (tc === 114) return results[+tok.slice(1)];
+      return undefined;
+    };
+    var argsOf = function (a) {
+      if (!a) return [];
+      var c = a.charCodeAt(0);
+      if (c === 3) return a.slice(1).split("\u0002");
+      if (c === 4 || c === 6) return a.slice(1).split("\u0002").map(token);
+      return decAll(JSON.parse(a));
+    };
+    var valueOf = function (a) {
+      var c = a.charCodeAt(0);
+      if (c === 3) return a.slice(1);
+      if (c === 4 || c === 6) return token(a.slice(1));
+      return dec(JSON.parse(a));
+    };
+    for (var i = 0; i < records.length; i++) {
+      var rec = records[i];
+      if (!rec) { results.push(undefined); continue; }
+      var kind = rec.charCodeAt(0), i1 = rec.indexOf(SEP), i2 = rec.indexOf(SEP, i1 + 1);
+      try {
+        var tok = rec.slice(1, i1);
+        var tgt = tok.charCodeAt(0) === 114 ? results[+tok.slice(1)] : target(+tok.slice(1));
+        var key = rec.slice(i1 + 1, i2), rest = rec.slice(i2 + 1);
+        if (kind === 115) { // s — the common case (a plain string value) stays inline
+          tgt[key] = rest.charCodeAt(0) === 3 ? rest.slice(1) : valueOf(rest);
+          results.push(undefined);
+        } else { // c / C
+          var res;
+          if (!rest) res = tgt[key]();
+          else if (rest.charCodeAt(0) === 3 && rest.indexOf("\u0002") < 0) res = tgt[key](rest.slice(1));
+          else if ((rest.charCodeAt(0) === 4 || rest.charCodeAt(0) === 6) && rest.indexOf("\u0002") < 0) res = tgt[key](token(rest.slice(1)));
+          else res = tgt[key].apply(tgt, argsOf(rest));
+          results.push(res);
+          if (compact) {
+            if (kind === 67) lines.push(handleString(res) || "-");
+          } else {
+            lines.push(kind === 67 ? handleString(res) || "-" : "-");
+          }
+        }
+      } catch (e) {
+        return "!" + i + SEP + (e && e.message !== undefined ? String(e.message) : String(e)) + "\u0005" + lines.join("\u0005");
+      }
+    }
+    return lines.join("\u0005");
+  };
 
   var ops = {
     root: function () { return g; },
@@ -415,65 +533,8 @@
       }
       return out;
     },
-    // A transaction of mutations in one call, in the bridge's compact spelling (not JSON per
-    // operation — that is what batch pays, and why batch is not faster per operation): records
-    // apart by \u0005, fields by \u0001 — "c<target>\u0001<method>\u0001<args>" (the args in the
-    // call spelling: \u0003 strings, \u0004/\u0006 tokens, or JSON), "C" the same for a document
-    // creation call, whose handle the host is waiting for, and "s<target>\u0001<key>\u0001<value>".
-    // A target or token "r<i>" is the answer of operation i. The answer is one line per call
-    // operation, apart by \u0005: the created node's handle for a "C", "-" for any other call
-    // (its answer is a node the host already holds, or nothing). On a failure the answer is
-    // "!<index>\u0001<message>" followed by the lines of the operations before it; the ones
-    // before it stand, as they would have had the host made the calls itself.
     txn: function (r) {
-      var records = String(r[1]).split("\u0005"), results = [], lines = [];
-      var resolve = function (tok) { return tok.charCodeAt(0) === 114 ? results[+tok.slice(1)] : target(+tok.slice(1)); };
-      var token = function (tok) {
-        var tc = tok.charCodeAt(0);
-        if (tc === 78) return null;
-        if (tc === 84) return true;
-        if (tc === 70) return false;
-        if (tc === 110) return +tok.slice(1);
-        if (tc === 115) return tok.slice(1);
-        if (tc === 104) return target(+tok.slice(1));
-        if (tc === 102) return hostFunction(+tok.slice(1));
-        if (tc === 114) return results[+tok.slice(1)];
-        return undefined;
-      };
-      var argsOf = function (a) {
-        if (!a) return [];
-        var c = a.charCodeAt(0);
-        if (c === 3) return a.slice(1).split("\u0002");
-        if (c === 4 || c === 6) return a.slice(1).split("\u0002").map(token);
-        return decAll(JSON.parse(a));
-      };
-      var valueOf = function (a) {
-        var c = a.charCodeAt(0);
-        if (c === 3) return a.slice(1);
-        if (c === 4 || c === 6) return token(a.slice(1));
-        return dec(JSON.parse(a));
-      };
-      for (var i = 0; i < records.length; i++) {
-        var rec = records[i];
-        if (!rec) { results.push(undefined); continue; }
-        var kind = rec.charCodeAt(0), i1 = rec.indexOf(SEP), i2 = rec.indexOf(SEP, i1 + 1);
-        try {
-          var tok = rec.slice(1, i1);
-          var tgt = tok.charCodeAt(0) === 114 ? results[+tok.slice(1)] : target(+tok.slice(1));
-          var key = rec.slice(i1 + 1, i2), rest = rec.slice(i2 + 1);
-          if (kind === 115) { // s — the common case (a plain string value) stays inline
-            tgt[key] = rest.charCodeAt(0) === 3 ? rest.slice(1) : valueOf(rest);
-            results.push(undefined);
-          } else { // c / C
-            var res = tgt[key].apply(tgt, argsOf(rest));
-            results.push(res);
-            lines.push(kind === 67 ? handleString(res) || "-" : "-");
-          }
-        } catch (e) {
-          return json("!" + i + SEP + (e && e.message !== undefined ? String(e.message) : String(e)) + "\u0005" + lines.join("\u0005"));
-        }
-      }
-      return json(lines.join("\u0005"));
+      return json(runTxn(r[1], false));
     },
     // A sequence of events at one target in one call: the guest makes each one and runs the ordinary dispatch,
     // so bubbling, cancelation, activation and listeners (the host's included) behave exactly as when the host
@@ -492,7 +553,9 @@
         if (o === undefined) return;
         var left = sent[id] - e[1];
         if (left > 0) { sent[id] = left; return; }
-        byObj.delete(o); byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); live--;
+        if (o && typeof o === "object" && o[HID] === id) { try { o[HID] = undefined; } catch (err) { byObj.delete(o); } }
+        else byObj.delete(o);
+        byId[id] = undefined; infos[id] = undefined; sent[id] = 0; free.push(id); live--;
       });
       return null;
     },
@@ -531,14 +594,18 @@
 
   g.__rpc = function (s) {
     try {
-      var c = s.charCodeAt(0), i = s.indexOf(SEP), j;
+      var c = s.charCodeAt(0);
+      if (c === 116) { // t: direct compact transaction (t<records>)
+        return "s" + runTxn(s.slice(1), true);
+      }
+      var i = s.indexOf(SEP), j;
       if (c === 107) { // k: kids (k<id>\1<elementsOnly: 0|1>)
         var kidNodes = [], kn = target(+s.slice(1, i)), elOnly = s.charCodeAt(i + 1) === 49;
         for (var kc = kn.firstChild; kc; kc = kc.nextSibling) if (!elOnly || kc.nodeType === 1) kidNodes.push(kc);
         return reply(kidNodes);
       }
       if (c === 103) return reply(target(+s.slice(1, i))[s.slice(i + 1)]); // g
-      if (c === 99) { // c
+      if (c === 99 || c === 118) { // c or v (void/known-return method call)
         j = s.indexOf(SEP, i + 1);
         var a = s.slice(j + 1);
         var parsedArgs;
@@ -561,7 +628,8 @@
         } else {
           parsedArgs = decAll(JSON.parse(a));
         }
-        return reply(callMethod(+s.slice(1, i), s.slice(i + 1, j), parsedArgs));
+        var mres = callMethod(+s.slice(1, i), s.slice(i + 1, j), parsedArgs);
+        return c === 118 ? "U" : reply(mres);
       }
       if (c === 115) { // s
         j = s.indexOf(SEP, i + 1);

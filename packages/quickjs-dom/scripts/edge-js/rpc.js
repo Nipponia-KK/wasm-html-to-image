@@ -289,13 +289,18 @@
     }
   };
   var callHost = function (id, self, args) {
+    // the page's mutation version (the C tree/attribute version) rides with the call: the host
+    // drops what it has read only when the version has moved since it read, so a callback the
+    // page reaches without changing anything does not cost the host its cached reads
+    var ver = -1;
+    try { ver = D.version(); } catch (e) {}
     var plain = plainTokenOk(self);
     for (var pi = 0; plain && pi < args.length; pi++) plain = plainTokenOk(args[pi]);
     if (plain) {
       // the handles go with their class when the host has not seen them (an event listener's event, on its first call)
       var ptoks = [plainToken(self, false)];
       for (pi = 0; pi < args.length; pi++) ptoks.push(plainToken(args[pi], pi === 0 && args.length === 1));
-      var preply = g.__host.callback(String(id), "\u0005" + ptoks.join("\u0002"));
+      var preply = g.__host.callback(String(id), "\u0005" + ver + "\u0001" + ptoks.join("\u0002"));
       if (preply === undefined) throw new Error("the host has no function " + id);
       if (preply.charCodeAt(0) === 6) return tokenValue(preply.slice(1));
       var pr = JSON.parse(preply);
@@ -314,7 +319,7 @@
         toks.push(t);
       }
     }
-    var reply = g.__host.callback(String(id), toks ? "\u0005" + toks.join("\u0002") : JSON.stringify([selfEnc, list]));
+    var reply = g.__host.callback(String(id), toks ? "\u0005" + ver + "\u0001" + toks.join("\u0002") : JSON.stringify([selfEnc, list, ver]));
     if (reply === undefined) throw new Error("the host has no function " + id);
     if (reply.charCodeAt(0) === 6) return tokenValue(reply.slice(1));
     var r = JSON.parse(reply);

@@ -65,3 +65,69 @@ describe("host callbacks with the window as receiver", () => {
     expect(got).toBe(first);
   });
 });
+
+// A callback carries the page's mutation version, and the bridge drops its cached
+// reads in full only when that version has moved. These tests pin the freshness
+// that has to survive the lighter drop: a tree change by an earlier page listener
+// (the version moves), and a form value written by page code (the page keeps it
+// outside the tree, so the version does not move and the volatile drop covers it).
+describe("callback invalidation follows the page's mutation version", () => {
+  let dom2: QuickJSDOM;
+  let w2: any;
+  beforeAll(async () => {
+    dom2 = await createDOM(
+      { html: "<!doctype html><body><div id=box><span id=s>old</span></div><input id=i value=old><button id=b>go</button></body>" },
+      { settleMs: 0 },
+    );
+    w2 = dom2.bridge().window;
+  });
+  afterAll(() => dom2.close());
+
+  it("a tree change by an earlier page listener is read fresh by a host listener", async () => {
+    const d = w2.document;
+    const span = d.getElementById("s");
+    expect(span.textContent).toBe("old"); // fill the host's read cache before the dispatch
+    await dom2.eval(
+      "document.getElementById('b').addEventListener('click', () => { document.getElementById('s').textContent = 'new'; })",
+    );
+    let seen: unknown = null;
+    d.getElementById("b").addEventListener("click", () => {
+      seen = span.textContent;
+    });
+    d.getElementById("b").dispatchEvent(new w2.MouseEvent("click"));
+    expect(seen).toBe("new");
+  });
+
+  it("a form value written by page code is read fresh even when the tree did not change", async () => {
+    const d = w2.document;
+    const input = d.getElementById("i");
+    expect(input.value).toBe("old"); // fill the volatile read cache before the dispatch
+    await dom2.eval(
+      "document.getElementById('b').addEventListener('change', () => { document.getElementById('i').value = 'typed'; })",
+    );
+    let seen: unknown = null;
+    d.getElementById("b").addEventListener("change", () => {
+      seen = input.value;
+    });
+    d.getElementById("b").dispatchEvent(new w2.Event("change"));
+    expect(seen).toBe("typed");
+  });
+
+  it("a handler replaced by page code is not skipped by the host's set memo", async () => {
+    const d = w2.document;
+    const btn = d.getElementById("b");
+    const first = () => {};
+    btn.onclick = first; // the host's set, remembered by the bridge
+    await dom2.eval(
+      "document.getElementById('b').addEventListener('swap', () => { document.getElementById('b').onclick = () => 'page'; })",
+    );
+    let hits = 0;
+    btn.addEventListener("swap", () => {
+      hits++;
+    });
+    btn.dispatchEvent(new w2.Event("swap")); // the page listener replaces onclick, then the host callback runs
+    expect(hits).toBe(1);
+    btn.onclick = first; // the same host set again: it must land, not be memoized away
+    expect(btn.onclick).toBe(first);
+  });
+});

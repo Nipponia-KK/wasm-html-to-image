@@ -97,6 +97,13 @@ const STRUCT_KEYS = new Set([
   "firstChild", "lastChild", "nextSibling", "previousSibling", "parentNode", "parentElement",
   "firstElementChild", "lastElementChild", "nextElementSibling", "previousElementSibling", "childElementCount", "isConnected",
 ]);
+/** Properties the page keeps in its own stores rather than in the tree — a form control's current
+ * value, checkedness and selection — which the C mutation version does not move when page code
+ * writes them. Reads of them are cached apart and dropped at every callback, version or not. */
+const VOLATILE_KEYS = new Set([
+  "value", "checked", "selected", "indeterminate",
+  "selectionStart", "selectionEnd", "selectionDirection", "scrollTop", "scrollLeft",
+]);
 /** Calls that make a new node (a custom element's constructor could run page code: `fineOk` rules that out). */
 const CREATE_CALLS = new Set(["createElement", "createElementNS", "createTextNode", "createComment", "createDocumentFragment"]);
 /** Calls that change the tree and run page code only through a custom element's callbacks. */
@@ -452,6 +459,12 @@ export class Bridge {
   // gives the same answer until the page changes (a write, any other call, a job or timer, a listener of the host's
   // that ran): the cache is dropped then.
   private readonly reads = new Map<string, unknown>();
+  /** Reads of the VOLATILE_KEYS properties, kept apart so a callback can drop just them. */
+  private readonly vreads = new Map<string, unknown>();
+  /** The page's C mutation version at the moment the caches were last known to match the page
+   * (-1: not known). A callback carries the version; when it has not moved, the tree and the
+   * attributes are as the caches hold them and only the volatile state is dropped. */
+  private cacheVer = -1;
   /** `el.style` answers, kept apart: the declaration object of an element never changes identity when its
    * properties are written, so an attribute-only change (invalidateAttrs) must not drop these — a run of
    * style writes otherwise pays a fresh crossing per write just to re-read the same object. */
@@ -670,7 +683,9 @@ export class Bridge {
   /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
   invalidate(keepCe = false, keepOd = false): void {
     this.treeGen++;
+    this.cacheVer = -1;
     if (this.reads.size) this.reads.clear();
+    if (this.vreads.size) this.vreads.clear();
     if (this.setMemo.size) this.setMemo.clear();
     if (this.attrMemo.size) this.attrMemo.clear();
     if (this.styleObjs.size) this.styleObjs.clear();
@@ -695,6 +710,22 @@ export class Bridge {
   /** A change of attributes only: no page code runs (`fineOk` has checked), so what depends on the tree's shape holds. */
   private invalidateAttrs(): void {
     if (this.reads.size) this.reads.clear();
+    if (this.vreads.size) this.vreads.clear();
+  }
+
+  /** A callback the page reached with its mutation version unchanged since the caches were
+   * filled: no tree or attribute has changed, so only what that version does not cover is
+   * dropped — the volatile reads, the set memos for those same properties and for handlers
+   * (page code may have replaced either in its own stores), and the window functions page
+   * code may have replaced. */
+  private invalidateVolatile(): void {
+    if (this.vreads.size) this.vreads.clear();
+    if (this.stableReads.size) this.stableReads.clear();
+    for (const per of this.setMemo.values()) for (const key of VOLATILE_KEYS) per.delete(key);
+    for (const k of [...this.handlers.keys()]) {
+      const key = k.slice(k.indexOf("\u0001set:") + 5);
+      if (VOLATILE_KEYS.has(key) || key.startsWith("on")) this.handlers.delete(k);
+    }
   }
 
   /** True when a change that is not a change of the tree may drop only part of what was read. */
@@ -1524,7 +1555,7 @@ export class Bridge {
     }
     const k = cell.id + "\u0001" + key;
     const style = key === "style" && cell.t === 1;
-    const store = style ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : this.reads;
+    const store = style ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : VOLATILE_KEYS.has(key) ? this.vreads : this.reads;
     if (store.has(k)) return store.get(k);
     const value = this.send("g" + cell.id + "\u0001" + key);
     if (store.size > 100000) store.clear();
@@ -1627,7 +1658,8 @@ export class Bridge {
       const per = this.setMemo.get(cell.id);
       if (per && per.get(key) === value) return;
       const rk = cell.id + "\u0001" + key;
-      if (this.reads.get(rk) === value && this.reads.has(rk)) {
+      const rstore = VOLATILE_KEYS.has(key) ? this.vreads : this.reads;
+      if (rstore.get(rk) === value && rstore.has(rk)) {
         if (per) per.set(key, value);
         else this.setMemo.set(cell.id, new Map([[key, value]]));
         return;
@@ -2293,21 +2325,50 @@ export class Bridge {
   callback(id: number, args: string): string | undefined {
     const fn = this.fnById.get(id);
     if (!fn) return undefined;
-    // the page may have changed anything since the host last read (the guest sets the event's currentTarget and
-    // eventPhase before each listener, and a listener of the page's may have touched the tree)
-    this.invalidate();
+    // the payload opens with the page's mutation version (see rpc.js callHost): when it has not
+    // moved since the caches were filled, no tree or attribute has changed, and only the state
+    // that version does not cover is dropped; when it has moved — or is not reported — the page
+    // may have changed anything since the host last read (the guest sets the event's
+    // currentTarget and eventPhase before each listener, and a listener of the page's may have
+    // touched the tree), so everything goes, as before
+    let ver = -1;
+    let tokens: string[] | null = null;
+    let parsed: [unknown, unknown[], number?] | null = null;
+    if (args.charCodeAt(0) === 5) {
+      let body = args.slice(1);
+      const cut = body.indexOf("\u0001");
+      if (cut > 0) {
+        const n = Number(body.slice(0, cut));
+        if (Number.isFinite(n)) {
+          ver = n;
+          body = body.slice(cut + 1);
+        }
+      }
+      tokens = body.split("\u0002");
+    } else {
+      try {
+        parsed = JSON.parse(args) as [unknown, unknown[], number?];
+        if (typeof parsed[2] === "number") ver = parsed[2];
+      } catch {
+        parsed = null; // the parse below, inside the try, reports it as before
+      }
+    }
+    if (ver >= 0 && ver === this.cacheVer) this.invalidateVolatile();
+    else {
+      this.invalidate();
+      if (ver >= 0) this.cacheVer = ver;
+    }
     this.depth++;
     try {
       let self: unknown;
       let list: unknown[];
-      if (args.charCodeAt(0) === 5) {
-        const tokens = args.slice(1).split("\u0002");
+      if (tokens) {
         self = this.decodeToken(tokens[0]);
         list = tokens.slice(1).map((t) => this.decodeToken(t));
       } else {
-        const parsed = JSON.parse(args) as [unknown, unknown[]];
-        self = this.decode(parsed[0]);
-        list = parsed[1].map((a) => this.decode(a));
+        const p = parsed ?? (JSON.parse(args) as [unknown, unknown[]]);
+        self = this.decode(p[0]);
+        list = (p[1] as unknown[]).map((a) => this.decode(a));
       }
       const value = fn.apply(self, list);
       const token = this.tokenOf(value);

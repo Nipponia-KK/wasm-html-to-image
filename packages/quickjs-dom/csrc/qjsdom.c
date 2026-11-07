@@ -39,6 +39,10 @@ static JSValue cached_error_fn = JS_UNDEFINED;
 static JSValue cached_host_fn = JS_UNDEFINED;
 static JSValue cached_byid = JS_UNDEFINED;
 static JSValue cached_tables = JS_UNDEFINED;
+static JSValue cached_sent = JS_UNDEFINED;
+static JSValue cached_infos = JS_UNDEFINED;
+static JSValue cached_freeArr = JS_UNDEFINED;
+static JSValue cached_liveBox = JS_UNDEFINED;
 static JSAtom cached_hid_atom = 0;
 static JSAtom cached_pcls_atom = 0;
 static JSAtom cached_evstatic_atom = 0;
@@ -49,14 +53,58 @@ static JSContext *cached_ctx = NULL;
 static JSValue js_fast_call(JSContext *c, JSValueConst self, int argc, JSValueConst *argv);
 static JSContext *fc_atoms_ctx = NULL;
 
+#define RPC_ATOM_CACHE_SIZE 16
+typedef struct {
+    char key[32];
+    uint8_t len;
+    JSAtom atom;
+} RpcAtomCache;
+static RpcAtomCache rpc_atom_cache[RPC_ATOM_CACHE_SIZE];
+
+static void reset_atom_cache(JSContext *c) {
+    for (int i = 0; i < RPC_ATOM_CACHE_SIZE; i++) {
+        if (rpc_atom_cache[i].atom) {
+            JS_FreeAtom(c, rpc_atom_cache[i].atom);
+            rpc_atom_cache[i].atom = 0;
+            rpc_atom_cache[i].len = 0;
+        }
+    }
+}
+
+static inline JSAtom get_or_create_atom(JSContext *c, const char *key, size_t len, int *need_free) {
+    if (len < sizeof(rpc_atom_cache[0].key)) {
+        uint32_t h = ((uint32_t)(uint8_t)key[0] * 31 + (uint32_t)(uint8_t)key[len - 1] * 7 + (uint32_t)len) & (RPC_ATOM_CACHE_SIZE - 1);
+        if (rpc_atom_cache[h].atom && rpc_atom_cache[h].len == (uint8_t)len && memcmp(rpc_atom_cache[h].key, key, len) == 0) {
+            *need_free = 0;
+            return rpc_atom_cache[h].atom;
+        }
+        JSAtom atom = JS_NewAtomLen(c, key, len);
+        if (rpc_atom_cache[h].atom) {
+            JS_FreeAtom(c, rpc_atom_cache[h].atom);
+        }
+        rpc_atom_cache[h].atom = JS_DupAtom(c, atom);
+        rpc_atom_cache[h].len = (uint8_t)len;
+        memcpy(rpc_atom_cache[h].key, key, len);
+        *need_free = 1;
+        return atom;
+    }
+    *need_free = 1;
+    return JS_NewAtomLen(c, key, len);
+}
+
 static void reset_rpc_cache(void) {
     if (cached_ctx) {
+        reset_atom_cache(cached_ctx);
         if (!JS_IsUndefined(cached_rpc_fn)) JS_FreeValue(cached_ctx, cached_rpc_fn);
         if (!JS_IsUndefined(cached_reply_fn)) JS_FreeValue(cached_ctx, cached_reply_fn);
         if (!JS_IsUndefined(cached_error_fn)) JS_FreeValue(cached_ctx, cached_error_fn);
         if (!JS_IsUndefined(cached_host_fn)) JS_FreeValue(cached_ctx, cached_host_fn);
         if (!JS_IsUndefined(cached_byid)) JS_FreeValue(cached_ctx, cached_byid);
         if (!JS_IsUndefined(cached_tables)) JS_FreeValue(cached_ctx, cached_tables);
+        if (!JS_IsUndefined(cached_sent)) JS_FreeValue(cached_ctx, cached_sent);
+        if (!JS_IsUndefined(cached_infos)) JS_FreeValue(cached_ctx, cached_infos);
+        if (!JS_IsUndefined(cached_freeArr)) JS_FreeValue(cached_ctx, cached_freeArr);
+        if (!JS_IsUndefined(cached_liveBox)) JS_FreeValue(cached_ctx, cached_liveBox);
         if (cached_hid_atom) JS_FreeAtom(cached_ctx, cached_hid_atom);
         if (cached_pcls_atom) JS_FreeAtom(cached_ctx, cached_pcls_atom);
         if (cached_evstatic_atom) JS_FreeAtom(cached_ctx, cached_evstatic_atom);
@@ -68,6 +116,10 @@ static void reset_rpc_cache(void) {
     cached_host_fn = JS_UNDEFINED;
     cached_byid = JS_UNDEFINED;
     cached_tables = JS_UNDEFINED;
+    cached_sent = JS_UNDEFINED;
+    cached_infos = JS_UNDEFINED;
+    cached_freeArr = JS_UNDEFINED;
+    cached_liveBox = JS_UNDEFINED;
     cached_hid_atom = 0;
     cached_pcls_atom = 0;
     cached_evstatic_atom = 0;
@@ -88,6 +140,10 @@ static void update_rpc_cache(void) {
         cached_byid = JS_GetPropertyStr(ctx, global, "__byId");
         cached_tables = JS_GetPropertyStr(ctx, global, "__rpcTables");
         if (JS_IsObject(cached_tables)) {
+            cached_sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
+            cached_infos = JS_GetPropertyStr(ctx, cached_tables, "infos");
+            cached_freeArr = JS_GetPropertyStr(ctx, cached_tables, "free");
+            cached_liveBox = JS_GetPropertyStr(ctx, cached_tables, "liveBox");
             JSValue hid = JS_GetPropertyStr(ctx, cached_tables, "hid");
             if (JS_IsSymbol(hid)) cached_hid_atom = JS_ValueToAtom(ctx, hid);
             JS_FreeValue(ctx, hid);
@@ -545,12 +601,8 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
     const char *cls = rpc_node_cls(v, n);
     if (!cls) return -1;
 
-    JSValue sent = JS_GetPropertyStr(ctx, cached_tables, "sent");
-    JSValue infos = JS_GetPropertyStr(ctx, cached_tables, "infos");
-    JSValue freeArr = JS_GetPropertyStr(ctx, cached_tables, "free");
-    JSValue liveBox = JS_GetPropertyStr(ctx, cached_tables, "liveBox");
     int len = -1;
-    if (JS_IsArray(sent) != 1 || JS_IsArray(infos) != 1 || JS_IsArray(freeArr) != 1 || !JS_IsObject(liveBox)) goto out;
+    if (JS_IsArray(cached_sent) != 1 || JS_IsArray(cached_infos) != 1 || JS_IsArray(cached_freeArr) != 1 || !JS_IsObject(cached_liveBox)) goto out;
     /* the id: the object's own HID, when byId still holds the object under it */
     int64_t id = -1;
     JSValue idv = JS_GetProperty(ctx, v, cached_hid_atom);
@@ -570,16 +622,16 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
     JS_FreeValue(ctx, idv);
     if (id < 0) {
         int64_t flen = 0;
-        if (JS_GetLength(ctx, freeArr, &flen)) goto out;
+        if (JS_GetLength(ctx, cached_freeArr, &flen)) goto out;
         if (flen > 0) {
-            JSValue fv = JS_GetPropertyUint32(ctx, freeArr, (uint32_t)(flen - 1));
+            JSValue fv = JS_GetPropertyUint32(ctx, cached_freeArr, (uint32_t)(flen - 1));
             if (!JS_IsNumber(fv)) {
                 JS_FreeValue(ctx, fv);
                 goto out;
             }
             JS_ToInt64(ctx, &id, fv);
             JS_FreeValue(ctx, fv);
-            if (JS_SetLength(ctx, freeArr, flen - 1) < 0) goto out;
+            if (JS_SetLength(ctx, cached_freeArr, flen - 1) < 0) goto out;
         } else {
             int64_t blen = 0;
             if (JS_GetLength(ctx, cached_byid, &blen)) goto out;
@@ -587,22 +639,22 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
         }
         if (JS_SetProperty(ctx, v, cached_hid_atom, JS_NewInt64(ctx, id)) < 0) goto out;
         JS_SetPropertyUint32(ctx, cached_byid, (uint32_t)id, JS_DupValue(ctx, v));
-        JS_SetPropertyUint32(ctx, sent, (uint32_t)id, JS_NewInt32(ctx, 0));
-        JSValue lv = JS_GetPropertyStr(ctx, liveBox, "v");
+        JS_SetPropertyUint32(ctx, cached_sent, (uint32_t)id, JS_NewInt32(ctx, 0));
+        JSValue lv = JS_GetPropertyStr(ctx, cached_liveBox, "v");
         int64_t lvn = 0;
         JS_ToInt64(ctx, &lvn, lv);
         JS_FreeValue(ctx, lv);
-        JS_SetPropertyStr(ctx, liveBox, "v", JS_NewInt64(ctx, lvn + 1));
+        JS_SetPropertyStr(ctx, cached_liveBox, "v", JS_NewInt64(ctx, lvn + 1));
     }
     { /* sent[id]++: the handle has been sent once more */
-        JSValue sv = JS_GetPropertyUint32(ctx, sent, (uint32_t)id);
+        JSValue sv = JS_GetPropertyUint32(ctx, cached_sent, (uint32_t)id);
         int64_t s = 0;
         JS_ToInt64(ctx, &s, sv);
         JS_FreeValue(ctx, sv);
-        JS_SetPropertyUint32(ctx, sent, (uint32_t)id, JS_NewInt64(ctx, s + 1));
+        JS_SetPropertyUint32(ctx, cached_sent, (uint32_t)id, JS_NewInt64(ctx, s + 1));
     }
     /* a recorded answer is reused as it stands */
-    JSValue info = JS_GetPropertyUint32(ctx, infos, (uint32_t)id);
+    JSValue info = JS_GetPropertyUint32(ctx, cached_infos, (uint32_t)id);
     if (JS_IsString(info)) {
         size_t n2;
         const char *s = JS_ToCStringLen(ctx, &n2, info);
@@ -683,16 +735,12 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
         JS_FreeValue(ctx, ans);
         goto out;
     }
-    JS_SetPropertyUint32(ctx, infos, (uint32_t)id, JS_DupValue(ctx, ans));
+    JS_SetPropertyUint32(ctx, cached_infos, (uint32_t)id, JS_DupValue(ctx, ans));
     JS_FreeValue(ctx, ans);
     if (idOut) *idOut = id;
     len = (int)pos;
 out:
     if (len < 0) JS_FreeValue(ctx, JS_GetException(ctx)); /* a half-kept book is handleString's to repair */
-    JS_FreeValue(ctx, sent);
-    JS_FreeValue(ctx, infos);
-    JS_FreeValue(ctx, freeArr);
-    JS_FreeValue(ctx, liveBox);
     return len;
 }
 
@@ -1396,9 +1444,10 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                             size_t toklen = (size_t)(req + len - tok);
                             v = rpc_decode_token(ctx, byid, tok, toklen);
                         }
-                        JSAtom atom = JS_NewAtomLen(ctx, key, keylen);
+                        int free_atom = 0;
+                        JSAtom atom = get_or_create_atom(ctx, key, keylen, &free_atom);
                         int set_res = JS_SetProperty(ctx, obj, atom, v);
-                        JS_FreeAtom(ctx, atom);
+                        if (free_atom) JS_FreeAtom(ctx, atom);
                         JS_FreeValue(ctx, obj);
                         if (set_res < 0) {
                             JSValue exc = JS_GetException(ctx);
@@ -1485,9 +1534,10 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                     JS_FreeValue(ctx, obj);
                     goto slow;
                 }
-                JSAtom atom = JS_NewAtomLen(ctx, key, keylen);
+                int free_atom = 0;
+                JSAtom atom = get_or_create_atom(ctx, key, keylen, &free_atom);
                 JSValue v = kind == 'g' ? JS_GetProperty(ctx, obj, atom) : JS_Invoke(ctx, obj, atom, (int)argc, argv);
-                JS_FreeAtom(ctx, atom);
+                if (free_atom) JS_FreeAtom(ctx, atom);
                 for (uint32_t i = 0; i < argc && argv; i++) JS_FreeValue(ctx, argv[i]);
                 JS_FreeValue(ctx, argv_arr);
                 JS_FreeValue(ctx, obj);

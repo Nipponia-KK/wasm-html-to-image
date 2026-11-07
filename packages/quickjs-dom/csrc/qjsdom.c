@@ -1431,6 +1431,40 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                 const char *key = sep1 + 1;
                 size_t keylen = (size_t)((req[0] == 'g' ? req + len : sep2) - key);
 
+                if (req[0] == 'c' && sep2 + 1 < req + len && sep2[1] == 3) {
+                    const char *tag_or_text = sep2 + 2;
+                    size_t str_len = (size_t)(req + len - tag_or_text);
+                    if (memchr(tag_or_text, 2, str_len) == NULL) {
+                        ND *doc_nd = nd_of(obj);
+                        if (doc_nd && doc_nd->type == 9) {
+                            int is_elem = keylen == 13 && memcmp(key, "createElement", 13) == 0;
+                            int is_text = keylen == 14 && memcmp(key, "createTextNode", 14) == 0;
+                            if (is_text || (is_elem && memchr(tag_or_text, '-', str_len) == NULL)) {
+                                JSValue new_node = is_elem
+                                    ? nd_new(ctx, obj, 1, tag_or_text, str_len, doc_nd->xml ? 0 : 1)
+                                    : nd_new(ctx, obj, 3, tag_or_text, str_len, 0);
+                                JS_FreeValue(ctx, obj);
+                                if (JS_IsException(new_node)) {
+                                    JSValue exc = JS_GetException(ctx);
+                                    JSValue out = JS_Call(ctx, error_fn, JS_UNDEFINED, 1, &exc);
+                                    JS_FreeValue(ctx, exc);
+                                    if (JS_IsException(out)) {
+                                        set_result_error();
+                                        rc = 1;
+                                    } else {
+                                        set_result_value(out);
+                                        JS_FreeValue(ctx, out);
+                                        rc = 0;
+                                    }
+                                } else {
+                                    rc = rpc_answer(new_node, reply_fn);
+                                }
+                                goto slow;
+                            }
+                        }
+                    }
+                }
+
                 if (req[0] == 's') {
                     /* Property set: s<id>\1<key>\1\3<string> or \4/\6<token> */
                     if (sep2 + 1 < req + len && (sep2[1] == 3 || sep2[1] == 4 || sep2[1] == 6)) {

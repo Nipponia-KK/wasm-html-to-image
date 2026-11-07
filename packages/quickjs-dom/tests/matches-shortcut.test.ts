@@ -15,12 +15,15 @@ const selectors = [
   "input[type=text]",
   "input, textarea",
   "my-el",
-  "foreignobject",
   "style",
   "div p",
   "div > p",
   "a:not(.x)",
   "DIV",
+  "input:not([list])[type=text]",
+  "input:not([type]):not([list]), button",
+  "div:not(.a)",
+  "p:not(.a), div",
 ];
 
 describe("matches", () => {

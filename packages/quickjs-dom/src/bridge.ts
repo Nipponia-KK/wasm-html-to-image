@@ -107,19 +107,21 @@ const STRUCT_KEYS = new Set([
  * settles: true for a bare tag that is its own, false when no part names its tag. Anything else is undefined (ask the page).
  * Only tags in lower case with no namespace: an HTML element's localName is lower case, so the comparison is exact.
  */
-const SIMPLE_COMPOUND = /^([a-z][a-z0-9-]*)((?:\[[^\]\s"'\\]*\]|\.[\w-]+|#[\w-]+)*)$/;
+const COMPOUND = /\s*([a-z][a-z0-9-]*)((?:\[[^\]]*\]|\.[\w-]+|#[\w-]+|:not\([^()]*\))*)\s*(,|$)/y;
 const tagParts = new Map<string, { tag: string; bare: boolean }[] | null>();
 function tagMatch(selector: string, local: string): boolean | undefined {
   let parts = tagParts.get(selector);
   if (parts === undefined) {
     parts = [];
-    for (const raw of selector.split(",")) {
-      const m = SIMPLE_COMPOUND.exec(raw.trim());
+    COMPOUND.lastIndex = 0;
+    for (;;) {
+      const m = COMPOUND.exec(selector);
       if (!m) {
         parts = null;
         break;
       }
       parts.push({ tag: m[1], bare: m[2] === "" });
+      if (m[3] === "") break;
     }
     if (tagParts.size > 500) tagParts.clear();
     tagParts.set(selector, parts);
@@ -2019,7 +2021,7 @@ export class Bridge {
       this.invalidate(tree, tree && this.sameDocument(cell, args));
       return value;
     }
-    if (key === "matches" && cell.t === 1 && cell.l !== undefined && typeof args[0] === "string") {
+    if (key === "matches" && cell.t === 1 && cell.l !== undefined && cell.g === cell.l.toUpperCase() && typeof args[0] === "string") {
       const answer = tagMatch(args[0], cell.l);
       if (answer !== undefined) return answer;
     }

@@ -925,10 +925,11 @@
   ("width height min-width min-height max-width max-height top right bottom left font-size margin margin-top margin-right " +
     "margin-bottom margin-left padding padding-top padding-right padding-bottom padding-left border-width border-top-width " +
     "border-right-width border-bottom-width border-left-width").split(" ").forEach(function (k) { ZERO_LENGTHS[k] = 1; });
-  // font-family reads back as a browser serializes it: names joined by ", ", a name of several words quoted, a quoted
-  // name that is a plain identifier (and not a keyword) unquoted. A value with anything else in it (var(), escapes,
+  // font-family reads back with the quotes the CSSWG settled on (csswg-drafts#5846, WPT cssom/font-family-serialization-001):
+  // names joined by ", ", quotes only where a name needs them (a digit first, a keyword, a doubled space or other
+  // punctuation); "Times New Roman" and 'Veronica' read back unquoted. A value with anything else in it (var(), escapes,
   // !important) is left as written.
-  var FAMILY_KEYWORDS = " serif sans-serif monospace cursive fantasy system-ui ui-serif ui-sans-serif ui-monospace ui-rounded math emoji fangsong inherit initial unset revert revert-layer default ";
+  var FAMILY_KEYWORDS = " serif sans-serif monospace cursive fantasy system-ui ui-serif ui-sans-serif ui-monospace ui-rounded math emoji fangsong inherit initial unset revert revert-layer revert-rule default ";
   var familyCache = Object.create(null), familyCount = 0;
   var normalizeFamily = function (value) {
     var hit = familyCache[value];
@@ -943,8 +944,9 @@
         var quoted = m[1] !== undefined || m[2] !== undefined;
         var name = quoted ? (m[1] !== undefined ? m[1] : m[2]) : m[3].trim().replace(/\s+/g, " ");
         if (!name) { ok = false; break; }
-        var ident = /^-?[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿-]*$/.test(name);
-        if (quoted ? ident && FAMILY_KEYWORDS.indexOf(" " + name.toLowerCase() + " ") < 0 : name.indexOf(" ") < 0) parts.push(name);
+        // a name of identifiers joined by single spaces needs no quotes, unless it is a keyword that was quoted
+        var seq = name.split(" ").every(function (w) { return /^-?[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿-]*$/.test(w); });
+        if (quoted ? seq && FAMILY_KEYWORDS.indexOf(" " + name.toLowerCase() + " ") < 0 : seq) parts.push(name);
         else parts.push('"' + name + '"');
         if (m[4] === "") break;
       }

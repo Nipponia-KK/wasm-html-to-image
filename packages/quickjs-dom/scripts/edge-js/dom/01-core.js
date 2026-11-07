@@ -925,11 +925,42 @@
   ("width height min-width min-height max-width max-height top right bottom left font-size margin margin-top margin-right " +
     "margin-bottom margin-left padding padding-top padding-right padding-bottom padding-left border-width border-top-width " +
     "border-right-width border-bottom-width border-left-width").split(" ").forEach(function (k) { ZERO_LENGTHS[k] = 1; });
+  // font-family reads back as a browser serializes it: names joined by ", ", a name of several words quoted, a quoted
+  // name that is a plain identifier (and not a keyword) unquoted. A value with anything else in it (var(), escapes,
+  // !important) is left as written.
+  var FAMILY_KEYWORDS = " serif sans-serif monospace cursive fantasy system-ui ui-serif ui-sans-serif ui-monospace ui-rounded math emoji fangsong inherit initial unset revert revert-layer default ";
+  var familyCache = Object.create(null), familyCount = 0;
+  var normalizeFamily = function (value) {
+    var hit = familyCache[value];
+    if (hit !== undefined) return hit;
+    var out = value;
+    if (value.indexOf("(") < 0 && value.indexOf("\\") < 0 && value.indexOf("!") < 0) {
+      var parts = [], re = /\s*(?:"([^"]*)"|'([^']*)'|((?:[^\s,"']+\s*)+?))\s*(,|$)/y, m, ok = true;
+      re.lastIndex = 0;
+      while (re.lastIndex < value.length || parts.length === 0) {
+        m = re.exec(value);
+        if (!m) { ok = false; break; }
+        var quoted = m[1] !== undefined || m[2] !== undefined;
+        var name = quoted ? (m[1] !== undefined ? m[1] : m[2]) : m[3].trim().replace(/\s+/g, " ");
+        if (!name) { ok = false; break; }
+        var ident = /^-?[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿-]*$/.test(name);
+        if (quoted ? ident && FAMILY_KEYWORDS.indexOf(" " + name.toLowerCase() + " ") < 0 : name.indexOf(" ") < 0) parts.push(name);
+        else parts.push('"' + name + '"');
+        if (m[4] === "") break;
+      }
+      if (ok) out = parts.join(", ");
+    }
+    if (familyCount++ > 500) { familyCache = Object.create(null); familyCount = 0; }
+    familyCache[value] = out;
+    return out;
+  };
+  D.normalizeFamily = normalizeFamily;
   var styleSet = function (s, name, value) {
     name = name.indexOf("--") === 0 ? name : kebab(name);
     var items = styleItems(s).filter(function (d) { return d[0] !== name; });
     value = value == null ? "" : String(value);
     if (value === "0" && ZERO_LENGTHS[name]) value = "0px";
+    if (name === "font-family") value = normalizeFamily(value.trim());
     // calc() serializes a negative term with the minus sign, as in browsers and jsdom's cssstyle
     if (value.indexOf("calc(") >= 0) value = value.replace(/\+ -(?=[\d.])/g, "- ");
     if (value !== "") items.push([name, value]);
@@ -938,7 +969,7 @@
   def(StyleDecl.prototype, "getPropertyValue", function (name) {
     name = String(name).indexOf("--") === 0 ? String(name) : kebab(String(name));
     var items = styleItems(this);
-    for (var i = 0; i < items.length; i++) if (items[i][0] === name) return items[i][1];
+    for (var i = 0; i < items.length; i++) if (items[i][0] === name) return name === "font-family" ? normalizeFamily(items[i][1]) : items[i][1];
     return "";
   });
   def(StyleDecl.prototype, "setProperty", function (name, value) { styleSet(this, String(name), value); });

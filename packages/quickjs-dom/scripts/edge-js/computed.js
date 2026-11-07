@@ -731,6 +731,7 @@
     var rootPx = ownPx;
     if (parent && doc && doc.documentElement && doc.documentElement !== el) rootPx = parseFloat(computedOf(doc.documentElement, depth + 1)["font-size"]) || 16;
     for (k in out) if (k !== "font-size" && k.slice(0, 2) !== "--" && k !== "font-family") out[k] = lengthsIn(out[k], ownPx, rootPx);
+    if (out["font-family"] && D.normalizeFamily) out["font-family"] = D.normalizeFamily(String(out["font-family"]).trim());
     for (k in out) if (k === "color" || k === "fill" || k === "stroke" || k.slice(-6) === "-color") { if (out[k] !== "currentcolor") out[k] = normColor(out[k]); }
     if (pseudo && (pseudo === "before" || pseudo === "after") && (out.content === undefined || out.content === "normal" || out.content === "")) out.content = "none";
     if (out["overflow-x"] === undefined) out["overflow-x"] = "visible";

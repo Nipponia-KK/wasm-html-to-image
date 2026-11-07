@@ -1378,8 +1378,20 @@ export class Bridge {
   }
 
   /** Give the guest a fresh deadline for the call about to run; 0 is QuickJS's "no limit". */
+  private lastDeadline = 0;
   private armDeadline(): void {
-    this.vm.setDeadline(this.timeout === Infinity ? 0 : realNow() + this.timeout);
+    if (this.timeout === Infinity) {
+      if (this.lastDeadline !== 0) {
+        this.lastDeadline = 0;
+        this.vm.setDeadline(0);
+      }
+      return;
+    }
+    const now = realNow();
+    const threshold = Math.min(200, this.timeout / 4);
+    if (this.lastDeadline > now + threshold) return;
+    this.lastDeadline = now + this.timeout;
+    this.vm.setDeadline(this.lastDeadline);
   }
 
   private sendReleases(): void {

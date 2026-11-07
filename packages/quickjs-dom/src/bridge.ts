@@ -45,8 +45,10 @@ interface Cell {
   t?: number;
   /** the page-code generation (Bridge.codeGen) at which this element, made by createElement, was known to have no children and nothing since touched it */
   ek?: number;
-  /** the tree generation (Bridge.treeGen) at which this element was set to a single text child via non-empty textContent */
+  /** the page-code generation (Bridge.codeGen) at which this element was set to a single text child via non-empty textContent */
   st?: number;
+  stGen?: number;
+  stNode?: unknown;
   /** whether this wrapper is currently in Bridge.pinned */
   pinned?: boolean;
   n?: string;
@@ -717,18 +719,19 @@ export class Bridge {
   }
 
   /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
+  /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
   invalidate(keepCe = false, keepOd = false): void {
     this.treeGen++;
     this.cacheVer = -1;
     if (this.reads.size) this.reads.clear();
     if (this.vreads.size) this.vreads.clear();
-    if (this.setMemo.size) this.setMemo.clear();
-    if (this.attrMemo.size) this.attrMemo.clear();
-    if (this.styleObjs.size) this.styleObjs.clear();
-    if (this.sreads.size) this.sreads.clear();
     // the handlers the host set are the page's own until page code runs: a change of the tree cannot touch them
     // (only a custom element's callbacks could, and `ce` says there are none)
     if (!(keepCe && this.ce === 1)) {
+      if (this.setMemo.size) this.setMemo.clear();
+      if (this.attrMemo.size) this.attrMemo.clear();
+      if (this.styleObjs.size) this.styleObjs.clear();
+      if (this.sreads.size) this.sreads.clear();
       if (this.handlers.size) this.handlers.clear();
       // page code may have replaced what these answered; attribute-only and tree-only changes cannot
       if (this.stableReads.size) this.stableReads.clear();
@@ -739,6 +742,37 @@ export class Bridge {
       this.odGen++;
     }
     if (!keepCe && this.ce === 1) this.ce = 0;
+  }
+
+  private invalidateTreeCall(cell: Cell, args: unknown[]): void {
+    this.invalidateCellTree(cell);
+    for (const a of args) {
+      if (a && typeof a === "object") {
+        const ac = (a as any)[HANDLE] as Cell | undefined;
+        if (ac) this.invalidateCellTree(ac);
+      }
+    }
+  }
+
+  private invalidateCellTree(cell: Cell): void {
+    const base = cell.id + "\u0001";
+    const first = this.sreads.get(base + "firstChild") as any;
+    if (first && typeof first === "object" && first[HANDLE]) {
+      const fc = first[HANDLE] as Cell;
+      const fbase = fc.id + "\u0001";
+      this.sreads.delete(fbase + "previousSibling");
+      this.sreads.delete(fbase + "previousElementSibling");
+    }
+    const last = this.sreads.get(base + "lastChild") as any;
+    if (last && typeof last === "object" && last[HANDLE]) {
+      const lc = last[HANDLE] as Cell;
+      const lbase = lc.id + "\u0001";
+      this.sreads.delete(lbase + "nextSibling");
+      this.sreads.delete(lbase + "nextElementSibling");
+    }
+    for (const k of STRUCT_KEYS) {
+      this.sreads.delete(base + k);
+    }
   }
   /** The generation of the ownerDocument answers kept in the cells; a change that may move a node between documents ends it. */
   private odGen = 0;
@@ -1584,7 +1618,15 @@ export class Bridge {
       if (key === "firstChild" || key === "lastChild" || key === "firstElementChild" || key === "lastElementChild") return null;
       if (key === "childElementCount") return 0;
     }
-    if (cell.st === this.treeGen && !this.txn) {
+    if (cell.stGen === this.codeGen && !this.txn) {
+      if (key === "firstChild" || key === "lastChild") {
+        if (cell.stNode !== undefined) return cell.stNode;
+      } else if (key === "firstElementChild" || key === "lastElementChild") {
+        return null;
+      } else if (key === "childElementCount") {
+        return 0;
+      }
+    } else if (cell.st === this.treeGen && !this.txn) {
       if (key === "firstElementChild" || key === "lastElementChild") return null;
       if (key === "childElementCount") return 0;
     }
@@ -1606,7 +1648,10 @@ export class Bridge {
     const value = this.send("g" + cell.id + "\u0001" + key);
     if (store.size > 100000) store.clear();
     store.set(k, value);
-    if (cell.st === this.treeGen && !this.txn && (key === "firstChild" || key === "lastChild")) {
+    if (cell.stGen === this.codeGen && !this.txn && (key === "firstChild" || key === "lastChild")) {
+      cell.stNode = value;
+      store.set(cell.id + "\u0001" + (key === "firstChild" ? "lastChild" : "firstChild"), value);
+    } else if (cell.st === this.treeGen && !this.txn && (key === "firstChild" || key === "lastChild")) {
       store.set(cell.id + "\u0001" + (key === "firstChild" ? "lastChild" : "firstChild"), value);
     }
     return value;
@@ -1716,6 +1761,8 @@ export class Bridge {
     if (!memoizable && !(cell.t === 1 && ON_HANDLER.test(key))) {
       cell.ek = undefined;
       cell.st = undefined;
+      cell.stGen = undefined;
+      cell.stNode = undefined;
     }
     // inside a transaction, a state-only write is queued, not sent; the flush applies it.
     // textContent is queueable too, even though it is not a fine set on the direct path (it
@@ -1790,7 +1837,10 @@ export class Bridge {
     }
     // an assignment runs page code only through a custom element (`ce` says there is none), and moves a node to another
     // document only when it is given a node
-    else this.invalidate(true, value === null || (typeof value !== "object" && typeof value !== "function") || !(value as any)[HANDLE]);
+    else {
+      this.invalidateCellTree(cell);
+      this.invalidate(true, value === null || (typeof value !== "object" && typeof value !== "function") || !(value as any)[HANDLE]);
+    }
     if (typeof value === "string" && !value.includes("\u0001") && !value.includes("\u0002")) {
       this.send("s" + cell.id + "\u0001" + key + "\u0001\u0003" + value);
     } else {
@@ -1805,8 +1855,12 @@ export class Bridge {
       if (value === "" || value === null) {
         cell.ek = this.codeGen;
         cell.st = undefined;
+        cell.stGen = undefined;
+        cell.stNode = undefined;
       } else if (typeof value === "string") {
         cell.st = this.treeGen;
+        cell.stGen = this.codeGen;
+        cell.stNode = undefined;
         cell.ek = undefined;
       }
     }
@@ -1953,6 +2007,8 @@ export class Bridge {
     if (!ATTR_CALLS.has(key) && !LISTENER_CALLS.has(key) && !PURE_CALLS.has(key)) {
       cell.ek = undefined;
       cell.st = undefined;
+      cell.stGen = undefined;
+      cell.stNode = undefined;
     }
     const encoded = this.encodeArgs(args);
     if (cell.t === 9 ? CREATE_CALLS.has(key) : cell.t === 1 ? ATTR_CALLS.has(key) || LISTENER_CALLS.has(key) : false) {
@@ -2018,6 +2074,7 @@ export class Bridge {
       // a change of the tree runs page code only through a custom element (`ce` says there is none); it moves a node to
       // another document only when the receiver and a node it was given are not known to be of one document
       const tree = TREE_CALLS.has(key);
+      if (tree && this.ce === 1) this.invalidateTreeCall(cell, args);
       this.invalidate(tree, tree && this.sameDocument(cell, args));
       return value;
     }

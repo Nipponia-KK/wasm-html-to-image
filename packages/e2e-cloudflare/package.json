@@ -10,7 +10,7 @@
     "test": "node scripts/smoke.mjs"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261106.1",
+    "@cloudflare/workers-types": "^5.20261108.1",
     "@types/node": "26.6.6",
     "cf": "1.0.0-beta.28",
     "typescript": "^7.0.2",

@@ -60,6 +60,19 @@ static JSValue js_dom_mark_hooked(JSContext *c, JSValueConst this_val, int argc,
     return JS_UNDEFINED;
 }
 
+static inline size_t format_uint64(char *dest, uint64_t v) {
+    char tmp[24];
+    size_t i = 0;
+    do {
+        tmp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v > 0);
+    for (size_t j = 0; j < i; j++) {
+        dest[j] = tmp[i - 1 - j];
+    }
+    return i;
+}
+
 #define RPC_ATOM_CACHE_SIZE 16
 typedef struct {
     char key[32];
@@ -712,21 +725,22 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
     }
     size_t pos = 0;
     buf[pos++] = 'h';
-    char num[24];
-    int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
-    if (pos + (size_t)numlen > cap) goto out;
-    memcpy(buf + pos, num, (size_t)numlen);
-    pos += (size_t)numlen;
+    if (pos + 24 > cap) goto out;
+    pos += format_uint64(buf + pos, (uint64_t)id);
     buf[pos++] = 1;
     size_t clslen = strlen(cls);
     if (pos + clslen > cap) goto out;
     memcpy(buf + pos, cls, clslen);
     pos += clslen;
     buf[pos++] = 1;
-    numlen = snprintf(num, sizeof num, "%d", n->type);
-    if (pos + (size_t)numlen > cap) goto out;
-    memcpy(buf + pos, num, (size_t)numlen);
-    pos += (size_t)numlen;
+    if (n->type < 10) {
+        if (pos + 1 > cap) goto out;
+        buf[pos++] = (char)('0' + n->type);
+    } else {
+        if (pos + 2 > cap) goto out;
+        buf[pos++] = '1';
+        buf[pos++] = (char)('0' + (n->type - 10));
+    }
     buf[pos++] = 1;
     if (pos + (size_t)nnlen > cap) goto out;
     memcpy(buf + pos, nn, (size_t)nnlen);
@@ -1543,6 +1557,35 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                 if (req[0] == 's') {
                     /* Property set: s<id>\1<key>\1\3<string> or \4/\6<token> */
                     if (sep2 + 1 < req + len && (sep2[1] == 3 || sep2[1] == 4 || sep2[1] == 6)) {
+                        if (!dom_hooks_active && sep2[1] == 3 && keylen == 11 && memcmp(key, "textContent", 11) == 0) {
+                            ND *n = nd_of(obj);
+                            if (n && (n->type == 1 || n->type == 3)) {
+                                const char *s = sep2 + 2;
+                                size_t slen = (size_t)(req + len - s);
+                                if (n->type == 3) {
+                                    int jok = nd_jbegin();
+                                    if (jok && !JS_IsNull(n->parent)) nd_jkids(ctx, n->parent);
+                                    nd_jend(jok, 1);
+                                    nd_version++;
+                                    free(n->tag);
+                                    n->tag = nd_dup(s, slen);
+                                    n->taglen = (int)slen;
+                                } else {
+                                    nd_clear(ctx, obj);
+                                    if (slen) {
+                                        JSValue t = nd_new(ctx, n->owner, 3, s, slen, 0);
+                                        if (!JS_IsException(t)) {
+                                            nd_insert(ctx, obj, t, JS_NULL);
+                                            JS_FreeValue(ctx, t);
+                                        }
+                                    }
+                                }
+                                JS_FreeValue(ctx, obj);
+                                rpc_set_prefixed('N', "", 0);
+                                rc = 0;
+                                goto slow;
+                            }
+                        }
                         JSValue v = JS_UNDEFINED;
                         if (sep2[1] == 3) {
                             const char *val = sep2 + 2;

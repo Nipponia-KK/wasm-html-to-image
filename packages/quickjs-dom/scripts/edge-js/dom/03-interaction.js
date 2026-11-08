@@ -304,6 +304,7 @@
   var rangesInstalled = false;
   var installRanges = function () {
     rangesInstalled = true;
+    if (D && D.markHooked) D.markHooked();
     var count = function (n) { return n.nodeType === 11 ? n.childNodes.length : 1; };
     wrap(P.Node, "appendChild", function (orig) {
       return function (node) {

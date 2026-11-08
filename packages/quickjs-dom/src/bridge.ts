@@ -596,7 +596,18 @@ export class Bridge {
           }
           return Reflect.set(t, k, v, r);
         }
-        bridge.pin(r);
+        const cell = (t as any)[HANDLE] as Cell | undefined;
+        if (cell && cell.self === r) {
+          if (!cell.pinned) {
+            cell.pinned = true;
+            bridge.pinned.add(r);
+            if (bridge.pinned.size >= bridge.pinLimit && !bridge.txn && !bridge.pinSweeping && !bridge.closed) {
+              bridge.scheduleSweepPinned();
+            }
+          }
+        } else {
+          bridge.pin(r);
+        }
         (t as any)[k] = v;
         return true;
       },
@@ -763,6 +774,7 @@ export class Bridge {
   }
 
   private invalidateTreeCall(cell: Cell, args: unknown[]): void {
+    if (this.sreads.size === 0) return;
     this.invalidateCellTree(cell);
     for (const a of args) {
       if (a && typeof a === "object") {
@@ -773,6 +785,7 @@ export class Bridge {
   }
 
   private invalidateCellTree(cell: Cell): void {
+    if (this.sreads.size === 0) return;
     const base = cell.id + "\u0001";
     const first = this.sreads.get(base + "firstChild") as any;
     if (first && typeof first === "object" && first[HANDLE]) {
@@ -1516,9 +1529,9 @@ export class Bridge {
       case 85: // U
         return undefined;
       case 104:
-        return this.handleOf(r.slice(1));
+        return this.handleOf(r, 1);
       case 97: // a: handles of a list, apart by \u0002
-        return r.length === 1 ? [] : r.slice(1).split("\u0002").map((s) => this.handleOf(s.slice(1)));
+        return r.length === 1 ? [] : r.slice(1).split("\u0002").map((s) => this.handleOf(s, 1));
       case 106: // j
         return this.decode(JSON.parse(r.slice(1)));
       case 107: // k
@@ -1542,10 +1555,11 @@ export class Bridge {
     { c?: string; t?: number; n?: string; l?: string; g?: string; proto?: any; handler?: ProxyHandler<object> }
   >();
 
-  private handleOf(s: string): unknown {
-    const sep = s.indexOf("\u0001");
+  private handleOf(s: string, offset = 0): unknown {
+    const sep = s.indexOf("\u0001", offset);
     if (sep < 0) {
-      const id = Number(s);
+      let id = 0;
+      for (let i = offset; i < s.length; i++) id = id * 10 + (s.charCodeAt(i) - 48);
       const known = this.wrappers.get(id)?.deref();
       if (known) {
         (known as any)[HANDLE].count++;
@@ -1553,7 +1567,8 @@ export class Bridge {
       }
       return this.wrapper({ i: id });
     }
-    const id = Number(s.slice(0, sep));
+    let id = 0;
+    for (let i = offset; i < sep; i++) id = id * 10 + (s.charCodeAt(i) - 48);
     const known = this.wrappers.get(id)?.deref();
     if (known) {
       (known as any)[HANDLE].count++;
@@ -1873,7 +1888,7 @@ export class Bridge {
       this.fineOk()
     ) {
       this.invalidateAttrs();
-      if (emptyTextSet) {
+      if (emptyTextSet && this.sreads.size > 0) {
         const base = cell.id + "\u0001";
         this.sreads.delete(base + "firstChild");
         this.sreads.delete(base + "lastChild");

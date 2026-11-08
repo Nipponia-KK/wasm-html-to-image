@@ -611,6 +611,7 @@
     });
   };
   def(MutationObserver.prototype, "observe", function (target, options) {
+    if (D && D.markHooked) D.markHooked();
     install();
     var opt = Object.assign({}, options);
     if (opt.attributeOldValue || opt.attributeFilter) opt.attributes = opt.attributes === undefined ? true : opt.attributes;
@@ -754,6 +755,7 @@
   var ceInstall = function () {
     if (ceOn) return;
     ceOn = true;
+    if (D && D.markHooked) D.markHooked();
     Object.defineProperty(globalThis, "__ceOn", { value: true, configurable: true });
     var live = function (parent) { return parent.isConnected; };
     wrap(P.Node, "appendChild", function (orig) {

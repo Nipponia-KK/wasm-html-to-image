@@ -53,6 +53,26 @@ static JSContext *cached_ctx = NULL;
 static JSValue js_fast_call(JSContext *c, JSValueConst self, int argc, JSValueConst *argv);
 static JSContext *fc_atoms_ctx = NULL;
 
+static int dom_hooks_active = 0;
+static JSValue js_dom_mark_hooked(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)c; (void)this_val; (void)argc; (void)argv;
+    dom_hooks_active = 1;
+    return JS_UNDEFINED;
+}
+
+static inline size_t format_uint64(char *dest, uint64_t v) {
+    char tmp[24];
+    size_t i = 0;
+    do {
+        tmp[i++] = (char)('0' + (v % 10));
+        v /= 10;
+    } while (v > 0);
+    for (size_t j = 0; j < i; j++) {
+        dest[j] = tmp[i - 1 - j];
+    }
+    return i;
+}
+
 #define RPC_ATOM_CACHE_SIZE 16
 typedef struct {
     char key[32];
@@ -126,6 +146,7 @@ static void reset_rpc_cache(void) {
     cached_event_proto = JS_UNDEFINED;
     cached_ctx = NULL;
     fc_atoms_ctx = NULL;
+    dom_hooks_active = 0;
 }
 
 static void update_rpc_cache(void) {
@@ -466,7 +487,10 @@ EXPORT("qd_init") int qd_init(size_t memory_limit, size_t stack_limit) {
     JS_SetPropertyStr(ctx, native, "parseHTML", JS_NewCFunction(ctx, native_parse_html, "parseHTML", 2));
     nd_register(ctx, native);
     JSValue dom = JS_GetPropertyStr(ctx, native, "dom");
-    if (JS_IsObject(dom)) JS_SetPropertyStr(ctx, dom, "fastCall", JS_NewCFunction(ctx, js_fast_call, "fastCall", 3));
+    if (JS_IsObject(dom)) {
+        JS_SetPropertyStr(ctx, dom, "fastCall", JS_NewCFunction(ctx, js_fast_call, "fastCall", 3));
+        JS_SetPropertyStr(ctx, dom, "markHooked", JS_NewCFunction(ctx, js_dom_mark_hooked, "markHooked", 0));
+    }
     JS_FreeValue(ctx, dom);
     JS_SetPropertyStr(ctx, global, "__native", native);
     JS_FreeValue(ctx, global);
@@ -701,21 +725,22 @@ static int rpc_node_handle(JSValueConst v, ND *n, char *buf, size_t cap, int64_t
     }
     size_t pos = 0;
     buf[pos++] = 'h';
-    char num[24];
-    int numlen = snprintf(num, sizeof num, "%lld", (long long)id);
-    if (pos + (size_t)numlen > cap) goto out;
-    memcpy(buf + pos, num, (size_t)numlen);
-    pos += (size_t)numlen;
+    if (pos + 24 > cap) goto out;
+    pos += format_uint64(buf + pos, (uint64_t)id);
     buf[pos++] = 1;
     size_t clslen = strlen(cls);
     if (pos + clslen > cap) goto out;
     memcpy(buf + pos, cls, clslen);
     pos += clslen;
     buf[pos++] = 1;
-    numlen = snprintf(num, sizeof num, "%d", n->type);
-    if (pos + (size_t)numlen > cap) goto out;
-    memcpy(buf + pos, num, (size_t)numlen);
-    pos += (size_t)numlen;
+    if (n->type < 10) {
+        if (pos + 1 > cap) goto out;
+        buf[pos++] = (char)('0' + n->type);
+    } else {
+        if (pos + 2 > cap) goto out;
+        buf[pos++] = '1';
+        buf[pos++] = (char)('0' + (n->type - 10));
+    }
     buf[pos++] = 1;
     if (pos + (size_t)nnlen > cap) goto out;
     memcpy(buf + pos, nn, (size_t)nnlen);
@@ -1431,9 +1456,136 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                 const char *key = sep1 + 1;
                 size_t keylen = (size_t)((req[0] == 'g' ? req + len : sep2) - key);
 
+                if (req[0] == 'v' && keylen == 11 && memcmp(key, "appendChild", 11) == 0 &&
+                    !dom_hooks_active &&
+                    sep2 + 1 < req + len && (sep2[1] == 4 || sep2[1] == 6) && sep2[2] == 'h') {
+                    uint32_t cid = 0;
+                    int cid_ok = 1;
+                    for (const char *p = sep2 + 3; p < req + len; p++) {
+                        if (*p < '0' || *p > '9') { cid_ok = 0; break; }
+                        cid = cid * 10 + (uint32_t)(*p - '0');
+                    }
+                    if (cid_ok) {
+                        JSValue child = JS_GetPropertyUint32(ctx, byid, cid);
+                        if (JS_IsObject(child)) {
+                            ND *pn = nd_of(obj);
+                            ND *cn = nd_of(child);
+                            if (pn && cn) {
+                                JSValue r = nd_insert_checked(ctx, obj, child, JS_NULL);
+                                JS_FreeValue(ctx, child);
+                                JS_FreeValue(ctx, obj);
+                                if (JS_IsException(r)) {
+                                    JSValue exc = JS_GetException(ctx);
+                                    JSValue out = JS_Call(ctx, error_fn, JS_UNDEFINED, 1, &exc);
+                                    JS_FreeValue(ctx, exc);
+                                    if (JS_IsException(out)) {
+                                        set_result_error();
+                                        rc = 1;
+                                    } else {
+                                        set_result_value(out);
+                                        JS_FreeValue(ctx, out);
+                                        rc = 0;
+                                    }
+                                } else {
+                                    JS_FreeValue(ctx, r);
+                                    rpc_set_prefixed('U', "", 0);
+                                    rc = 0;
+                                }
+                                goto slow;
+                            }
+                        }
+                        JS_FreeValue(ctx, child);
+                    }
+                }
+
+                if (req[0] == 'v' && keylen == 12 && memcmp(key, "setAttribute", 12) == 0 &&
+                    !dom_hooks_active &&
+                    sep2 + 1 < req + len && sep2[1] == 3) {
+                    const char *name = sep2 + 2;
+                    const char *sep3 = memchr(name, 2, (size_t)(req + len - name));
+                    if (sep3) {
+                        size_t nl = (size_t)(sep3 - name);
+                        const char *val = sep3 + 1;
+                        size_t vl = (size_t)(req + len - val);
+                        ND *n = nd_of(obj);
+                        if (n && n->type == 1) {
+                            char *low = nd_attr_fold(n, name, nl);
+                            nd_set_attr(n, low ? low : name, nl, val, vl);
+                            free(low);
+                            JS_FreeValue(ctx, obj);
+                            rpc_set_prefixed('U', "", 0);
+                            rc = 0;
+                            goto slow;
+                        }
+                    }
+                }
+
+                if (req[0] == 'c' && sep2 + 1 < req + len && sep2[1] == 3) {
+                    const char *tag_or_text = sep2 + 2;
+                    size_t str_len = (size_t)(req + len - tag_or_text);
+                    if (memchr(tag_or_text, 2, str_len) == NULL) {
+                        ND *doc_nd = nd_of(obj);
+                        if (doc_nd && doc_nd->type == 9) {
+                            int is_elem = keylen == 13 && memcmp(key, "createElement", 13) == 0;
+                            int is_text = keylen == 14 && memcmp(key, "createTextNode", 14) == 0;
+                            if (is_text || (is_elem && memchr(tag_or_text, '-', str_len) == NULL)) {
+                                JSValue new_node = is_elem
+                                    ? nd_new(ctx, obj, 1, tag_or_text, str_len, doc_nd->xml ? 0 : 1)
+                                    : nd_new(ctx, obj, 3, tag_or_text, str_len, 0);
+                                JS_FreeValue(ctx, obj);
+                                if (JS_IsException(new_node)) {
+                                    JSValue exc = JS_GetException(ctx);
+                                    JSValue out = JS_Call(ctx, error_fn, JS_UNDEFINED, 1, &exc);
+                                    JS_FreeValue(ctx, exc);
+                                    if (JS_IsException(out)) {
+                                        set_result_error();
+                                        rc = 1;
+                                    } else {
+                                        set_result_value(out);
+                                        JS_FreeValue(ctx, out);
+                                        rc = 0;
+                                    }
+                                } else {
+                                    rc = rpc_answer(new_node, reply_fn);
+                                }
+                                goto slow;
+                            }
+                        }
+                    }
+                }
+
                 if (req[0] == 's') {
                     /* Property set: s<id>\1<key>\1\3<string> or \4/\6<token> */
                     if (sep2 + 1 < req + len && (sep2[1] == 3 || sep2[1] == 4 || sep2[1] == 6)) {
+                        if (!dom_hooks_active && sep2[1] == 3 && keylen == 11 && memcmp(key, "textContent", 11) == 0) {
+                            ND *n = nd_of(obj);
+                            if (n && (n->type == 1 || n->type == 3)) {
+                                const char *s = sep2 + 2;
+                                size_t slen = (size_t)(req + len - s);
+                                if (n->type == 3) {
+                                    int jok = nd_jbegin();
+                                    if (jok && !JS_IsNull(n->parent)) nd_jkids(ctx, n->parent);
+                                    nd_jend(jok, 1);
+                                    nd_version++;
+                                    free(n->tag);
+                                    n->tag = nd_dup(s, slen);
+                                    n->taglen = (int)slen;
+                                } else {
+                                    nd_clear(ctx, obj);
+                                    if (slen) {
+                                        JSValue t = nd_new(ctx, n->owner, 3, s, slen, 0);
+                                        if (!JS_IsException(t)) {
+                                            nd_insert(ctx, obj, t, JS_NULL);
+                                            JS_FreeValue(ctx, t);
+                                        }
+                                    }
+                                }
+                                JS_FreeValue(ctx, obj);
+                                rpc_set_prefixed('N', "", 0);
+                                rc = 0;
+                                goto slow;
+                            }
+                        }
                         JSValue v = JS_UNDEFINED;
                         if (sep2[1] == 3) {
                             const char *val = sep2 + 2;

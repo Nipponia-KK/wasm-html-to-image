@@ -182,6 +182,14 @@ export class QuickJSInstance {
     const ptr = this.x.qd_result_ptr();
     const len = this.x.qd_result_len();
     const mem = this.bytes();
+    if (len === 1) {
+      const c = mem[ptr];
+      if (c === 85) return { type, value: "U" };
+      if (c === 78) return { type, value: "N" };
+      if (c === 84) return { type, value: "T" };
+      if (c === 70) return { type, value: "F" };
+      return { type, value: String.fromCharCode(c) };
+    }
     if (len <= 64) {
       // a short ASCII answer ("N", a handle, a small number) is read by hand; anything else goes through the decoder
       let out = "";

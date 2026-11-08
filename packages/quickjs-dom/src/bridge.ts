@@ -596,7 +596,18 @@ export class Bridge {
           }
           return Reflect.set(t, k, v, r);
         }
-        bridge.pin(r);
+        const cell = (t as any)[HANDLE] as Cell | undefined;
+        if (cell && cell.self === r) {
+          if (!cell.pinned) {
+            cell.pinned = true;
+            bridge.pinned.add(r);
+            if (bridge.pinned.size >= bridge.pinLimit && !bridge.txn && !bridge.pinSweeping && !bridge.closed) {
+              bridge.scheduleSweepPinned();
+            }
+          }
+        } else {
+          bridge.pin(r);
+        }
         (t as any)[k] = v;
         return true;
       },
@@ -763,6 +774,7 @@ export class Bridge {
   }
 
   private invalidateTreeCall(cell: Cell, args: unknown[]): void {
+    if (this.sreads.size === 0) return;
     this.invalidateCellTree(cell);
     for (const a of args) {
       if (a && typeof a === "object") {
@@ -773,6 +785,7 @@ export class Bridge {
   }
 
   private invalidateCellTree(cell: Cell): void {
+    if (this.sreads.size === 0) return;
     const base = cell.id + "\u0001";
     const first = this.sreads.get(base + "firstChild") as any;
     if (first && typeof first === "object" && first[HANDLE]) {
@@ -1873,7 +1886,7 @@ export class Bridge {
       this.fineOk()
     ) {
       this.invalidateAttrs();
-      if (emptyTextSet) {
+      if (emptyTextSet && this.sreads.size > 0) {
         const base = cell.id + "\u0001";
         this.sreads.delete(base + "firstChild");
         this.sreads.delete(base + "lastChild");

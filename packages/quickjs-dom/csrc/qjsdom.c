@@ -53,6 +53,13 @@ static JSContext *cached_ctx = NULL;
 static JSValue js_fast_call(JSContext *c, JSValueConst self, int argc, JSValueConst *argv);
 static JSContext *fc_atoms_ctx = NULL;
 
+static int dom_hooks_active = 0;
+static JSValue js_dom_mark_hooked(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)c; (void)this_val; (void)argc; (void)argv;
+    dom_hooks_active = 1;
+    return JS_UNDEFINED;
+}
+
 #define RPC_ATOM_CACHE_SIZE 16
 typedef struct {
     char key[32];
@@ -126,6 +133,7 @@ static void reset_rpc_cache(void) {
     cached_event_proto = JS_UNDEFINED;
     cached_ctx = NULL;
     fc_atoms_ctx = NULL;
+    dom_hooks_active = 0;
 }
 
 static void update_rpc_cache(void) {
@@ -466,7 +474,10 @@ EXPORT("qd_init") int qd_init(size_t memory_limit, size_t stack_limit) {
     JS_SetPropertyStr(ctx, native, "parseHTML", JS_NewCFunction(ctx, native_parse_html, "parseHTML", 2));
     nd_register(ctx, native);
     JSValue dom = JS_GetPropertyStr(ctx, native, "dom");
-    if (JS_IsObject(dom)) JS_SetPropertyStr(ctx, dom, "fastCall", JS_NewCFunction(ctx, js_fast_call, "fastCall", 3));
+    if (JS_IsObject(dom)) {
+        JS_SetPropertyStr(ctx, dom, "fastCall", JS_NewCFunction(ctx, js_fast_call, "fastCall", 3));
+        JS_SetPropertyStr(ctx, dom, "markHooked", JS_NewCFunction(ctx, js_dom_mark_hooked, "markHooked", 0));
+    }
     JS_FreeValue(ctx, dom);
     JS_SetPropertyStr(ctx, global, "__native", native);
     JS_FreeValue(ctx, global);
@@ -1430,6 +1441,70 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
             if (JS_IsObject(obj)) {
                 const char *key = sep1 + 1;
                 size_t keylen = (size_t)((req[0] == 'g' ? req + len : sep2) - key);
+
+                if (req[0] == 'v' && keylen == 11 && memcmp(key, "appendChild", 11) == 0 &&
+                    !dom_hooks_active &&
+                    sep2 + 1 < req + len && (sep2[1] == 4 || sep2[1] == 6) && sep2[2] == 'h') {
+                    uint32_t cid = 0;
+                    int cid_ok = 1;
+                    for (const char *p = sep2 + 3; p < req + len; p++) {
+                        if (*p < '0' || *p > '9') { cid_ok = 0; break; }
+                        cid = cid * 10 + (uint32_t)(*p - '0');
+                    }
+                    if (cid_ok) {
+                        JSValue child = JS_GetPropertyUint32(ctx, byid, cid);
+                        if (JS_IsObject(child)) {
+                            ND *pn = nd_of(obj);
+                            ND *cn = nd_of(child);
+                            if (pn && cn) {
+                                JSValue r = nd_insert_checked(ctx, obj, child, JS_NULL);
+                                JS_FreeValue(ctx, child);
+                                JS_FreeValue(ctx, obj);
+                                if (JS_IsException(r)) {
+                                    JSValue exc = JS_GetException(ctx);
+                                    JSValue out = JS_Call(ctx, error_fn, JS_UNDEFINED, 1, &exc);
+                                    JS_FreeValue(ctx, exc);
+                                    if (JS_IsException(out)) {
+                                        set_result_error();
+                                        rc = 1;
+                                    } else {
+                                        set_result_value(out);
+                                        JS_FreeValue(ctx, out);
+                                        rc = 0;
+                                    }
+                                } else {
+                                    JS_FreeValue(ctx, r);
+                                    rpc_set_prefixed('U', "", 0);
+                                    rc = 0;
+                                }
+                                goto slow;
+                            }
+                        }
+                        JS_FreeValue(ctx, child);
+                    }
+                }
+
+                if (req[0] == 'v' && keylen == 12 && memcmp(key, "setAttribute", 12) == 0 &&
+                    !dom_hooks_active &&
+                    sep2 + 1 < req + len && sep2[1] == 3) {
+                    const char *name = sep2 + 2;
+                    const char *sep3 = memchr(name, 2, (size_t)(req + len - name));
+                    if (sep3) {
+                        size_t nl = (size_t)(sep3 - name);
+                        const char *val = sep3 + 1;
+                        size_t vl = (size_t)(req + len - val);
+                        ND *n = nd_of(obj);
+                        if (n && n->type == 1) {
+                            char *low = nd_attr_fold(n, name, nl);
+                            nd_set_attr(n, low ? low : name, nl, val, vl);
+                            free(low);
+                            JS_FreeValue(ctx, obj);
+                            rpc_set_prefixed('U', "", 0);
+                            rc = 0;
+                            goto slow;
+                        }
+                    }
+                }
 
                 if (req[0] == 'c' && sep2 + 1 < req + len && sep2[1] == 3) {
                     const char *tag_or_text = sep2 + 2;

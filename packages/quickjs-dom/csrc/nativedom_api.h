@@ -74,6 +74,7 @@ static JSValue nd_clone(JSContext *c, JSValueConst src, int deep, JSValueConst o
     JSValue copy = nd_new(c, owner, s->type, s->tag, (size_t)s->taglen, 0);
     if (JS_IsException(copy)) return copy;
     ND *d = nd_of(copy);
+    d->html_named = s->html_named;
     for (int i = 0; i < s->nattrs; i++) nd_set_attr(d, s->attrs[i].name, (size_t)s->attrs[i].nlen, s->attrs[i].val, (size_t)s->attrs[i].vlen);
     /* a clone of a document is a document: its children belong to it */
     JSValue childOwner = s->type == 9 ? copy : owner;
@@ -172,11 +173,13 @@ static JSValue js_nd_type(JSContext *ctx, JSValueConst this_val) { ND_THIS(n); r
    upper-cased (the DOM spec). Mirrors namespaceURI in scripts/edge-js/dom/01-core.js. */
 static int nd_attr_case_folded(ND *n) {
     if (n->foreign) return 0;
+    if (n->html_named) return 1;
     ND *owner = JS_IsNull(n->owner) ? NULL : nd_of(n->owner);
     if (owner && owner->xml) return 0;
     if (!n->tag) return 1;
     if ((n->taglen == 3 && !memcmp(n->tag, "svg", 3)) || (n->taglen == 4 && !memcmp(n->tag, "math", 4))) return 0;
     for (ND *a = JS_IsNull(n->parent) ? NULL : nd_of(n->parent); a && a->type == 1; a = JS_IsNull(a->parent) ? NULL : nd_of(a->parent)) {
+        if (a->html_named) continue;
         if (a->foreign || (a->taglen == 3 && !memcmp(a->tag, "svg", 3)) || (a->taglen == 4 && !memcmp(a->tag, "math", 4))) return 0;
         if ((a->taglen == 13 && !strncasecmp(a->tag, "foreignObject", 13)) || (a->taglen == 4 && !memcmp(a->tag, "desc", 4)) || (a->taglen == 5 && !memcmp(a->tag, "title", 5))) return 1;
         if (a->taglen == 14 && !memcmp(a->tag, "annotation-xml", 14)) {
@@ -630,6 +633,39 @@ static JSValue js_doc_element(JSContext *ctx, JSValueConst this_val, int magic) 
         if (nd_is_tag(nd_of(ch), want, (int)strlen(want))) return JS_DupValue(ctx, ch);
     return JS_NULL;
 }
+/* the DOM's "valid element local name": createElement refuses anything else */
+static int nd_valid_element_name(const char *s, size_t len) {
+    if (len == 0) return 0;
+    uint8_t first = (uint8_t)s[0];
+    if ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
+        for (size_t i = 0; i < len; i++) {
+            uint8_t ch = (uint8_t)s[i];
+            if (ch == 0 || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\f' || ch == '\r' || ch == '/' || ch == '>') return 0;
+        }
+        return 1;
+    }
+    if (first != ':' && first != '_' && first < 0x80) return 0;
+    for (size_t i = 1; i < len; i++) {
+        uint8_t ch = (uint8_t)s[i];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == ':' || ch == '_' || ch >= 0x80)) return 0;
+    }
+    return 1;
+}
+
+/* what createElement makes: an element of the HTML namespace in an HTML document, even under the name of an SVG or MathML
+   element (those come from the parser, or from createElementNS, whose elements are made with nd_new) */
+static JSValue nd_create_element(JSContext *c, JSValueConst doc, ND *d, const char *tag, size_t len) {
+    if (!nd_valid_element_name(tag, len)) return nd_throw(c, "InvalidCharacterError", "The tag name provided is not a valid name.");
+    int xml = d && d->type == 9 && d->xml;
+    JSValue r = nd_new(c, doc, 1, tag, len, xml ? 0 : 1);
+    if (JS_IsException(r) || xml) return r;
+    ND *n = nd_of(r);
+    if ((n->taglen == 3 && !memcmp(n->tag, "svg", 3)) || (n->taglen == 4 && !memcmp(n->tag, "math", 4))) n->html_named = 1;
+    int idx = nd_lookup_tag(n->tag, n->taglen);
+    if (idx >= 0 && !memcmp(nd_tag_protos[idx].cls, "SVG", 3) && !JS_IsUndefined(nd_unknown_proto)) JS_SetPrototype(c, r, nd_unknown_proto);
+    return r;
+}
+
 static JSValue js_doc_create(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
     ND_THIS(n);
     (void)n;
@@ -640,7 +676,7 @@ static JSValue js_doc_create(JSContext *ctx, JSValueConst this_val, int argc, JS
         s = JS_ToCStringLen(ctx, &len, argv[0]);
         if (!s) return JS_EXCEPTION;
     }
-    JSValue r = magic == 0 ? nd_new(ctx, this_val, 1, s, len, n && n->type == 9 && n->xml ? 0 : 1)
+    JSValue r = magic == 0 ? nd_create_element(ctx, this_val, n, s, len)
               : magic == 1 ? nd_new(ctx, this_val, 3, s, len, 0)
               : magic == 2 ? nd_new(ctx, this_val, 8, s, len, 0)
                            : nd_new(ctx, this_val, 11, NULL, 0, 0);
@@ -668,6 +704,24 @@ static JSValue js_dom_mark_foreign(JSContext *ctx, JSValueConst this_val, int ar
     ND *n = argc > 0 ? nd_of(argv[0]) : NULL;
     if (n) n->foreign = 1;
     return JS_UNDEFINED;
+}
+/* an element of a namespace other than HTML, for createElementNS: under an SVG name it keeps that name's interface */
+static JSValue js_dom_create_foreign(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    ND *d = argc > 1 ? nd_of(argv[0]) : NULL;
+    if (!d || d->type != 9) return JS_ThrowTypeError(ctx, "createForeign(document, name)");
+    size_t len;
+    const char *s = JS_ToCStringLen(ctx, &len, argv[1]);
+    if (!s) return JS_EXCEPTION;
+    JSValue r = nd_new(ctx, argv[0], 1, s, len, 0);
+    JS_FreeCString(ctx, s);
+    return r;
+}
+/* createElement named it svg or math in an HTML document: the namespace is HTML, whatever the name says */
+static JSValue js_dom_is_html_named(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    ND *n = argc > 0 ? nd_of(argv[0]) : NULL;
+    return JS_NewBool(ctx, n && n->html_named);
 }
 /* createElementNS keeps the name as given (linearGradient), where createElement lower-cased it */
 static JSValue js_dom_set_element_name(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1055,6 +1109,8 @@ static void nd_register(JSContext *c, JSValueConst native) {
     JS_SetPropertyStr(c, dom, "protos", protos);
     JS_SetPropertyStr(c, dom, "serialize", JS_NewCFunction(c, js_dom_serialize, "serialize", 1));
     JS_SetPropertyStr(c, dom, "markForeign", JS_NewCFunction(c, js_dom_mark_foreign, "markForeign", 1));
+    JS_SetPropertyStr(c, dom, "createForeign", JS_NewCFunction(c, js_dom_create_foreign, "createForeign", 2));
+    JS_SetPropertyStr(c, dom, "isHtmlNamed", JS_NewCFunction(c, js_dom_is_html_named, "isHtmlNamed", 1));
     JS_SetPropertyStr(c, dom, "setElementName", JS_NewCFunction(c, js_dom_set_element_name, "setElementName", 2));
     JS_SetPropertyStr(c, dom, "setTagProto", JS_NewCFunction(c, js_dom_set_tag_proto, "setTagProto", 2));
     JS_SetPropertyStr(c, dom, "version", JS_NewCFunction(c, js_dom_version, "version", 0));

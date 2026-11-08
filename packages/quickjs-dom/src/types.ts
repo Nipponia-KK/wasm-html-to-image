@@ -235,8 +235,8 @@ export interface QuickJSDOM {
   bridge(options?: BridgeOptions): Bridge;
   /**
    * Run `fn` with the bridge's DOM operations queued and flushed as one transaction (see
-   * {@link Bridge.transact}): the fast way to build or change a lot of the tree from the host —
-   * a framework's render, for instance.
+   * {@link Bridge.transact}): the page sees them together, at the flush. It is not faster than
+   * making the calls one by one, which take the C DOM's direct paths.
    */
   transact<T>(fn: () => T): T;
   /** Free the QuickJS runtime. The page cannot be used afterwards. */

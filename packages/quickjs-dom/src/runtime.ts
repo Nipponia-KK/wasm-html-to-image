@@ -43,6 +43,8 @@ interface Exports {
   qd_compile(code: number, len: number, name: number): number;
   qd_eval_bytecode(buf: number, len: number): number;
   qd_rpc(req: number, len: number): number;
+  qd_append(parent: number, child: number): number;
+  qd_create_element(doc: number, tag: number, len: number): number;
   qd_jobs(): number;
   qd_settle(id: number, ok: number, text: number, len: number): void;
   _initialize?(): void;
@@ -259,6 +261,29 @@ export class QuickJSInstance {
     const res = this.result() as EvalResult & { jobs?: boolean };
     if (rc & 2) res.jobs = true;
     return res;
+  }
+
+  /** `appendChild` by bridge ids, without a request; false when the ordinary request has to do it. */
+  append(parent: number, child: number): boolean {
+    return this.x.qd_append(parent, child) === 1;
+  }
+
+  /** `createElement` of an ASCII tag name, without a request: the new element's bridge id, or -1 (nothing was made that the host knows of). */
+  createElement(doc: number, tag: string): number {
+    const len = tag.length;
+    if (len + 1 > this.reqCap) {
+      if (this.reqPtr) this.x.qd_free(this.reqPtr);
+      this.reqCap = Math.max(4096, (len + 1) * 2);
+      this.reqPtr = this.x.qd_alloc(this.reqCap);
+    }
+    const mem = this.bytes();
+    const base = this.reqPtr;
+    for (let i = 0; i < len; i++) {
+      const c = tag.charCodeAt(i);
+      if (c > 127) return -1;
+      mem[base + i] = c;
+    }
+    return this.x.qd_create_element(doc, base, len);
   }
 
   /** Run bytecode that {@link QuickJSInstance.compile} made with this very build of QuickJS. */

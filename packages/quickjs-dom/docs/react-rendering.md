@@ -6,7 +6,7 @@ magnitude. Which one is right depends on where the React code runs.
 | Approach | Where React runs | 300-row tree (measured) | Use it for |
 | :--- | :--- | ---: | :--- |
 | Host-driven `react-dom` | Node, DOM in the page | ≈ 90 ms | Tests (Testing Library), incremental updates, event simulation |
-| Host-driven + `transact()` | Node, DOM in the page | ≈ 80–95 ms, level with the plain commit | Host-driven commits that interleave reads and writes |
+| Host-driven + `transact()` | Node, DOM in the page | ≈ 80–95 ms, no faster than the plain commit | Host-driven commits that interleave reads and writes |
 | In-page `renderToString` | Inside the page | ≈ 20 ms render, ≈ 22 ms render + parse + serialize | Prerendering / SSR-shaped output: HTML is the product |
 | In-page client render (`createRoot`) | Inside the page | ≈ 45 ms render, ≈ 40 ms full-tree update | Running the app itself in the page: interactive state, page scripts, hydration |
 
@@ -150,8 +150,9 @@ Wrap the whole synchronous `act(...)` call, not just `root.render(...)`: React s
 commit inside `act`, so a wrapper that returns before `act` flushes contains nothing. See the
 README's "Transactions" section for the exact semantics.
 
-What to expect: `transact()` buys no speed over the plain commit — about the same time, from 300
-rows (≈ 80 ms either way) to 3,000 items (≈ 380 ms mount either way) — and its value is the
+What to expect: `transact()` buys no speed over the plain commit. Updates take about the same
+time, and a mount of 3,000 new items is 10–20% slower, because the plain commit's common writes
+go straight to the C DOM while the queue is applied by the page's own script. Its value is the
 semantics above (one page call per commit, reads answered from the queue). It gets there because
 a commit is applied in as few page calls as it can be: node creation, tree and attribute calls,
 state-only property writes and `on…` handler assignments are queued, and the queue is applied

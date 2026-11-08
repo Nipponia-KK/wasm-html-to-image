@@ -20,6 +20,7 @@ typedef struct {
     uint32_t qid; /* live layout: the id the renderer knows this element by (0: none), see the journal below */
     uint8_t xml;  /* a document made as an XML document: its createElement keeps the name's case */
     uint8_t foreign; /* an element createElementNS made outside HTML, whatever it sits in */
+    uint8_t html_named; /* an element createElement named svg or math: HTML all the same, and so is what sits in it */
     /* links are strong references: parent <-> child cycles are found by gc_mark below */
     JSValue parent, first, last, prev, next;
     JSValue owner;   /* the document that made the node (null for a document) */
@@ -54,12 +55,12 @@ static inline uint32_t nd_tag_hash(const char *tag, int len) {
     return h;
 }
 
-static inline JSValue nd_lookup_tag_proto(const char *tag, int len) {
-    if (len <= 0 || len >= 16) return JS_UNDEFINED;
+static inline int nd_lookup_tag(const char *tag, int len) {
+    if (len <= 0 || len >= 16) return -1;
     uint32_t h = nd_tag_hash(tag, len) & ND_TAG_HASH_MASK;
     for (int step = 0; step < ND_TAG_HASH_SIZE; step++) {
         uint32_t idx = (h + step) & ND_TAG_HASH_MASK;
-        if (nd_tag_protos[idx].len == 0) return JS_UNDEFINED;
+        if (nd_tag_protos[idx].len == 0) return -1;
         if (nd_tag_protos[idx].len == len) {
             int same = 1;
             for (int k = 0; k < len; k++) {
@@ -68,10 +69,15 @@ static inline JSValue nd_lookup_tag_proto(const char *tag, int len) {
                 if (b >= 'A' && b <= 'Z') b += 32;
                 if (a != b) { same = 0; break; }
             }
-            if (same) return nd_tag_protos[idx].proto;
+            if (same) return (int)idx;
         }
     }
-    return JS_UNDEFINED;
+    return -1;
+}
+
+static inline JSValue nd_lookup_tag_proto(const char *tag, int len) {
+    int idx = nd_lookup_tag(tag, len);
+    return idx < 0 ? JS_UNDEFINED : nd_tag_protos[idx].proto;
 }
 
 static ND *nd_of(JSValueConst v) { return (ND *)JS_GetOpaque(v, nd_class_id); }

@@ -1847,10 +1847,12 @@
     // the element itself is foreign when it is (or sits in) an svg/math root; an integration
     // point (foreignObject, an annotation-xml serving HTML, an svg desc/title) makes its
     // CHILDREN HTML, not itself — so those are only met walking up from the parent
+    if (D.isHtmlNamed(this)) return NS.html;
     var t = this.localName;
     if (t === "svg") return NS.svg;
     if (t === "math") return NS.math;
     for (var n = this.parentNode; n && n.nodeType === 1; n = n.parentNode) {
+      if (D.isHtmlNamed(n)) continue;
       var lt = n.localName;
       if (lt === "svg") return NS.svg;
       if (lt === "math") return NS.math;
@@ -1861,8 +1863,9 @@
   });
   getter(P.Element, "prefix", function () { return null; });
   def(P.Document, "createElementNS", function (ns, name) {
-    var el = this.createElement(String(name));
-    if (ns && ns !== NS.html) { Object.defineProperty(el, NSKEY, { value: String(ns) }); D.markForeign(el); }
+    var foreign = ns && ns !== NS.html;
+    var el = foreign ? D.createForeign(this, String(name)) : this.createElement(String(name));
+    if (foreign) { Object.defineProperty(el, NSKEY, { value: String(ns) }); D.markForeign(el); }
     if (ns) D.setElementName(el, String(name));
     return el;
   });

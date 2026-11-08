@@ -17,6 +17,21 @@ export interface BridgeVM {
   rpc(request: string): EvalResult & { jobs?: boolean };
   jobs(): number;
   setDeadline(ms: number): void;
+  /** `appendChild` by id, when the VM can do it without a request; false sends the ordinary request. */
+  append?(parent: number, child: number): boolean;
+  /** `createElement` by id of the document, when the VM can do it without a request: the element's id, or -1. */
+  createElement?(doc: number, tag: string): number;
+}
+
+/** What follows the id in a handle, taken apart: the same for every node of one kind. */
+interface HandleTail {
+  c?: string;
+  t?: number;
+  n?: string;
+  l?: string;
+  g?: string;
+  proto?: any;
+  handler?: ProxyHandler<object>;
 }
 
 /** An interface of the page, as the guest describes it (see `schema` in rpc.js). */
@@ -71,6 +86,8 @@ interface Cell {
   /** The host defined a getter or setter on this wrapper: a write must reach it with the wrapper as `this`. */
   ownAccessor?: boolean;
   /** Lazy event property bundle received with a callback argument, valid for generation `evg` (`Bridge.treeGen`). */
+  /** Of a document: what elements of a tag answer as a handle, per tag name, so that the next one can be made by number. */
+  tagTails?: Map<string, HandleTail>;
   evb?: string;
   evg?: number;
   /** the keys of the bundle read so far (put into `reads`): a newer bundle for the same event replaces them */
@@ -97,6 +114,8 @@ const PURE_CALLS = new Set([
 ]);
 
 /** Reads that only the shape of the tree changes (and the document a node belongs to, which a move between trees changes). */
+/** How many property names `readKey` tells apart: a power of two that leaves the ids 2^33 of the 2^53 a number holds exactly. */
+const READ_NAMES = 2 ** 20;
 const STRUCT_KEYS = new Set([
   "firstChild", "lastChild", "nextSibling", "previousSibling", "parentNode", "parentElement",
   "firstElementChild", "lastElementChild", "nextElementSibling", "previousElementSibling", "childElementCount", "isConnected",
@@ -496,9 +515,13 @@ export class Bridge {
   // What reads answered since the page last ran code of its own. Reading a property or calling a pure method again
   // gives the same answer until the page changes (a write, any other call, a job or timer, a listener of the host's
   // that ran): the cache is dropped then.
-  private readonly reads = new Map<string, unknown>();
+  private readonly reads = new Map<number, unknown>();
   /** Reads of the VOLATILE_KEYS properties, kept apart so a callback can drop just them. */
-  private readonly vreads = new Map<string, unknown>();
+  private readonly vreads = new Map<number, unknown>();
+  /** The answers of the pure calls (keyed by the object, the method and the arguments), dropped with `reads`. */
+  private readonly callReads = new Map<string, unknown>();
+  /** A small number per property name: the key of `reads` is a number made of it and the object's id, no string per read. */
+  private readonly readNames = new Map<string, number>();
   /** The page's C mutation version at the moment the caches were last known to match the page
    * (-1: not known). A callback carries the version; when it has not moved, the tree and the
    * attributes are as the caches hold them and only the volatile state is dropped. */
@@ -747,12 +770,28 @@ export class Bridge {
     return this.sendJ(["live"]) as number;
   }
 
-  /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
+  /** The key in `reads` and `vreads` of an object's property. */
+  private readKey(id: number, key: string): number {
+    let name = this.readNames.get(key);
+    if (name === undefined) {
+      if (this.readNames.size >= READ_NAMES) {
+        // (a page that reads a million different names: numbers already given stop being unique)
+        this.readNames.clear();
+        this.reads.clear();
+        this.vreads.clear();
+      }
+      name = this.readNames.size;
+      this.readNames.set(key, name);
+    }
+    return id * READ_NAMES + name;
+  }
+
   /** The page may have changed: forget what was read. (Called by whoever ran code in the page.) */
   invalidate(keepCe = false, keepOd = false): void {
     this.treeGen++;
     this.cacheVer = -1;
     if (this.reads.size) this.reads.clear();
+    if (this.callReads.size) this.callReads.clear();
     if (this.vreads.size) this.vreads.clear();
     // the handlers the host set are the page's own until page code runs: a change of the tree cannot touch them
     // (only a custom element's callbacks could, and `ce` says there are none)
@@ -811,6 +850,7 @@ export class Bridge {
   /** A change of attributes only: no page code runs (`fineOk` has checked), so what depends on the tree's shape holds. */
   private invalidateAttrs(): void {
     if (this.reads.size) this.reads.clear();
+    if (this.callReads.size) this.callReads.clear();
     if (this.vreads.size) this.vreads.clear();
   }
 
@@ -1419,8 +1459,9 @@ export class Bridge {
       return;
     }
     const now = realNow();
-    const threshold = Math.min(200, this.timeout / 4);
-    if (this.lastDeadline > now + threshold) return;
+    // at most one setDeadline per 100 ms, and every call still gets (nearly) the whole budget: a call that starts just
+    // before an old deadline must not be cut off by it
+    if (this.lastDeadline > now + this.timeout - Math.min(100, this.timeout / 10)) return;
     this.lastDeadline = now + this.timeout;
     this.vm.setDeadline(this.lastDeadline);
   }
@@ -1550,10 +1591,9 @@ export class Bridge {
     for (const cls of this.classes.values()) delete cls.prototype[member];
   }
 
-  private readonly handleTails = new Map<
-    string,
-    { c?: string; t?: number; n?: string; l?: string; g?: string; proto?: any; handler?: ProxyHandler<object> }
-  >();
+  private readonly handleTails = new Map<string, HandleTail>();
+  /** The tail the last new wrapper was made from (read right after a createElement request). */
+  private lastTail: HandleTail | undefined;
 
   private handleOf(s: string, offset = 0): unknown {
     const sep = s.indexOf("\u0001", offset);
@@ -1592,6 +1632,7 @@ export class Bridge {
       };
       this.handleTails.set(tail, p);
     }
+    this.lastTail = p;
     return this.newWrapperWithTail(id, p);
   }
 
@@ -1628,9 +1669,14 @@ export class Bridge {
         (key === "ownerDocument" && cell.t !== 9 && cell.od !== undefined && !this.txn.treeTouched.has(cell));
       if (!local && this.txn.ops.length > 0 && this.txnAffects(cell, key)) {
         if (!this.txn.touched.has(cell)) {
-          const k = cell.id + "\u0001" + key;
-          const store = key === "style" && cell.t === 1 ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : this.reads;
-          if (store.has(k)) return store.get(k);
+          const local = key === "style" && cell.t === 1 ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : undefined;
+          if (local) {
+            const k = cell.id + "\u0001" + key;
+            if (local.has(k)) return local.get(k);
+          } else {
+            const k = this.readKey(cell.id, key);
+            if (this.reads.has(k)) return this.reads.get(k);
+          }
         }
         this.flushTxn();
       }
@@ -1689,9 +1735,10 @@ export class Bridge {
       if (key === "firstElementChild" || key === "lastElementChild") return null;
       if (key === "childElementCount") return 0;
     }
-    const k = cell.id + "\u0001" + key;
     const style = key === "style" && cell.t === 1;
-    const store = style ? this.styleObjs : STRUCT_KEYS.has(key) ? this.sreads : VOLATILE_KEYS.has(key) ? this.vreads : this.reads;
+    const byName = style || STRUCT_KEYS.has(key);
+    const k: string | number = byName ? cell.id + "\u0001" + key : this.readKey(cell.id, key);
+    const store: Map<any, unknown> = style ? this.styleObjs : byName ? this.sreads : VOLATILE_KEYS.has(key) ? this.vreads : this.reads;
     // the bundle of a callback's event argument comes first: it is newer than anything cached before the callback ran
     // (eventPhase, currentTarget, defaultPrevented), and the page cannot have run code since (same tree generation)
     if (cell.evb !== undefined && cell.evg === this.treeGen) {
@@ -1731,7 +1778,7 @@ export class Bridge {
 
   /** The items of a list of the page (Testing Library goes through each input's `labels`), until the page changes. */
   private items(cell: Cell): unknown[] {
-    const k = cell.id + "\u0001*array";
+    const k = this.readKey(cell.id, "*array");
     let list = this.reads.get(k) as unknown[] | undefined;
     if (!list) this.reads.set(k, (list = this.sendJ(["array", cell.id]) as unknown[]));
     return list;
@@ -1805,7 +1852,7 @@ export class Bridge {
     if (memoizable && !cell.pending) {
       const per = this.setMemo.get(cell.id);
       if (per && per.get(key) === value) return;
-      const rk = cell.id + "\u0001" + key;
+      const rk = this.readKey(cell.id, key);
       const rstore = VOLATILE_KEYS.has(key) ? this.vreads : this.reads;
       if (rstore.get(rk) === value && rstore.has(rk)) {
         if (per) per.set(key, value);
@@ -2093,6 +2140,38 @@ export class Bridge {
       cell.stGen = undefined;
       cell.stNode = undefined;
     }
+    if (!this.txn && !this.closed && args.length === 1) {
+      if (key === "appendChild" && (cell.t === 1 || cell.t === 11)) {
+        const child = (args[0] as any)?.[HANDLE] as Cell | undefined;
+        if (child && this.vm.append) {
+          if (this.released.length) this.sendReleases();
+          if (this.vm.append(cell.id, child.id)) {
+            if (this.depth === 0) this.onCall?.();
+            if (this.ce === 1) this.invalidateTreeCall(cell, args);
+            this.invalidate(true, this.sameDocument(cell, args));
+            return args[0];
+          }
+        }
+      } else if (key === "createElement" && cell.t === 9 && typeof args[0] === "string" && this.vm.createElement && this.fineOk()) {
+        const tail = cell.tagTails?.get(args[0]);
+        if (tail) {
+          if (this.released.length) this.sendReleases();
+          const id = this.vm.createElement(cell.id, args[0]);
+          if (id >= 0) {
+            if (this.depth === 0) this.onCall?.();
+            const known = this.wrappers.get(id)?.deref();
+            if (known) (known as any)[HANDLE].count++;
+            const made = (known ?? this.newWrapperWithTail(id, tail)) as any;
+            if (self) {
+              (made[HANDLE] as Cell).od = self;
+              (made[HANDLE] as Cell).odg = this.odGen;
+              if ((made[HANDLE] as Cell).t === 1) (made[HANDLE] as Cell).ek = this.codeGen;
+            }
+            return made;
+          }
+        }
+      }
+    }
     const encoded = this.encodeArgs(args);
     if (cell.t === 9 ? CREATE_CALLS.has(key) : cell.t === 1 ? ATTR_CALLS.has(key) || LISTENER_CALLS.has(key) : false) {
       // nothing that was read can have changed (a new node is in no tree, a listener is not read), or only an attribute did
@@ -2105,7 +2184,12 @@ export class Bridge {
             if (this.attrMemo.get(cell.id)?.get(args[0]) === String(v)) return undefined;
           }
         }
+        this.lastTail = undefined;
         const value = this.send((cell.t === 9 || key === "toggleAttribute" ? "c" : "v") + cell.id + "\u0001" + key + "\u0001" + encoded);
+        // what this tag's elements answer is known now: the next one can be made by number
+        if (key === "createElement" && cell.t === 9 && this.lastTail && typeof args[0] === "string" && args.length === 1) {
+          (cell.tagTails ??= new Map()).set(args[0], this.lastTail);
+        }
         if (cell.t === 9) {
           // a node made by a document belongs to it
           const made = value && typeof value === "object" ? ((value as any)[HANDLE] as Cell | undefined) : undefined;
@@ -2166,9 +2250,9 @@ export class Bridge {
       if (answer !== undefined) return answer;
     }
     const k = cell.id + "\u0001" + key + "\u0001" + encoded;
-    if (this.reads.has(k)) return this.reads.get(k);
+    if (this.callReads.has(k)) return this.callReads.get(k);
     const value = this.send("c" + cell.id + "\u0001" + key + "\u0001" + encoded);
-    this.reads.set(k, value);
+    this.callReads.set(k, value);
     // a value read back from the page seeds the attribute memo, like a read seeds the set memo
     if (key === "getAttribute" && cell.t === 1 && typeof args[0] === "string" && typeof value === "string" && !args[0].toLowerCase().startsWith("on")) {
       this.attrMemoSet(cell, args[0], value);
@@ -2406,7 +2490,7 @@ export class Bridge {
     const have = (cell.cols ??= {})[key];
     if (have) return have;
     const nodes = (): unknown[] => {
-      const k = cell.id + "\u0001*" + key;
+      const k = this.readKey(cell.id, "*" + key);
       let list = this.reads.get(k) as unknown[] | undefined;
       if (!list) {
         list = this.send("k" + cell.id + "\u0001" + (key === "children" ? "1" : "0")) as unknown[];
@@ -2470,8 +2554,8 @@ export class Bridge {
             const ec = (made as any)[HANDLE] as Cell | undefined;
             if (ec) {
               const init = args[1] !== null && typeof args[1] === "object" ? (args[1] as Record<string, unknown>) : undefined;
-              if (init && "view" in init) bridge.reads.set(ec.id + "\u0001view", init.view ?? null);
-              else if (name !== "Event" && name !== "CustomEvent") bridge.reads.set(ec.id + "\u0001view", null);
+              if (init && "view" in init) bridge.reads.set(bridge.readKey(ec.id, "view"), init.view ?? null);
+              else if (name !== "Event" && name !== "CustomEvent") bridge.reads.set(bridge.readKey(ec.id, "view"), null);
             }
           }
           if (new.target !== cls && made && typeof made === "object") {
@@ -2628,8 +2712,7 @@ export class Bridge {
         if (cell) {
           if (cell.evk) {
             // the same event again (another listener, another phase): what the last bundle answered is out of date
-            const prefix = cell.id + "\u0001";
-            for (const key of cell.evk) (VOLATILE_KEYS.has(key) ? this.vreads : this.reads).delete(prefix + key);
+            for (const key of cell.evk) (VOLATILE_KEYS.has(key) ? this.vreads : this.reads).delete(this.readKey(cell.id, key));
             cell.evk = undefined;
           }
           cell.evb = t.slice(cut + 1);

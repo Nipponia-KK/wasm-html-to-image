@@ -449,8 +449,9 @@ Creates a new isolated QuickJS + C DOM instance, loads the HTML, executes script
 
 Every property write or method call made through the bridge (`dom.window`, or the
 `wasm-quickjs-dom/jsdom` facade) normally crosses into the page one at a time. When a block of
-host code performs many mutations in a row — a framework commit phase is the classic case —
-wrap it in `transact` (on `QuickJSDOM`, and on the `JSDOM` facade class):
+host code needs them applied together, wrap it in `transact` (on `QuickJSDOM`, and on the `JSDOM`
+facade class). This is about when the page sees the operations, not speed: a plain React commit
+is as fast or faster (see [docs/react-rendering.md](docs/react-rendering.md)).
 
 ```ts
 dom.transact(() => {

@@ -1129,7 +1129,7 @@ static int fc_event_field(Buf *parts, int *nparts, const char *key, JSValueConst
     int tag = JS_VALUE_GET_TAG(val);
     if (tag == JS_TAG_BOOL) {
         ok = ok && buf_ch(&one, JS_VALUE_GET_BOOL(val) ? 'T' : 'F');
-    } else if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
+    } else if (JS_IsNumber(val)) { /* not the tag: under NaN-boxing (wasm32) a float's tag is not JS_TAG_FLOAT64 */
         double d = 0;
         JS_ToFloat64(ctx, &d, val);
         if (d - d == 0 && !(d == 0 && 1.0 / d < 0)) {
@@ -1280,7 +1280,7 @@ static int fc_token(JSValueConst v, int withEvent, Buf *out, FcTables *t, int64_
         JS_FreeCString(ctx, s);
         return ok;
     }
-    if (tag == JS_TAG_INT || tag == JS_TAG_FLOAT64) {
+    if (JS_IsNumber(v)) {
         double d = 0;
         JS_ToFloat64(ctx, &d, v);
         if (!(d - d == 0 && !(d == 0 && 1.0 / d < 0))) return 0;
@@ -1530,7 +1530,7 @@ EXPORT("qd_rpc") int qd_rpc(const char *req, size_t len) {
                             int is_text = keylen == 14 && memcmp(key, "createTextNode", 14) == 0;
                             if (is_text || (is_elem && memchr(tag_or_text, '-', str_len) == NULL)) {
                                 JSValue new_node = is_elem
-                                    ? nd_new(ctx, obj, 1, tag_or_text, str_len, doc_nd->xml ? 0 : 1)
+                                    ? nd_create_element(ctx, obj, doc_nd, tag_or_text, str_len)
                                     : nd_new(ctx, obj, 3, tag_or_text, str_len, 0);
                                 JS_FreeValue(ctx, obj);
                                 if (JS_IsException(new_node)) {
@@ -1724,6 +1724,52 @@ slow:
        see Bridge.send) when told some are waiting. */
     if (JS_IsJobPending(rt)) rc |= 2;
     return rc;
+}
+
+/* The host's commonest tree writes by number, with no request to compose and parse and no answer to decode. They do only
+   what qd_rpc's fast paths do, and decline (answering 0 or -1, with nothing changed) whatever those would not take; the
+   host then sends the ordinary request, which also reports any error. */
+EXPORT("qd_append") int qd_append(uint32_t parent, uint32_t child) {
+    update_rpc_cache();
+    if (dom_hooks_active || !JS_IsObject(cached_byid)) return 0;
+    JSValue p = JS_GetPropertyUint32(ctx, cached_byid, parent);
+    JSValue c = JS_GetPropertyUint32(ctx, cached_byid, child);
+    int done = 0;
+    if (JS_IsObject(p) && JS_IsObject(c) && nd_of(p) && nd_of(c)) {
+        /* every failure of the insertion comes before its first change */
+        JSValue r = nd_insert_checked(ctx, p, c, JS_NULL);
+        if (JS_IsException(r)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        } else {
+            JS_FreeValue(ctx, r);
+            done = 1;
+        }
+    }
+    JS_FreeValue(ctx, c);
+    JS_FreeValue(ctx, p);
+    return done;
+}
+
+/* An element made by a document: its bridge id (counted as sent, as a handle in an answer is), or -1. */
+EXPORT("qd_create_element") int qd_create_element(uint32_t doc, const char *tag, size_t len) {
+    update_rpc_cache();
+    if (!JS_IsObject(cached_byid) || memchr(tag, '-', len)) return -1;
+    JSValue obj = JS_GetPropertyUint32(ctx, cached_byid, doc);
+    ND *d = JS_IsObject(obj) ? nd_of(obj) : NULL;
+    int out = -1;
+    if (d && d->type == 9) {
+        JSValue node = nd_create_element(ctx, obj, d, tag, len);
+        if (JS_IsException(node)) {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        } else {
+            char buf[2500];
+            int64_t id = -1;
+            if (rpc_node_handle(node, nd_of(node), buf, sizeof buf, &id) >= 0 && id >= 0) out = (int)id;
+            JS_FreeValue(ctx, node);
+        }
+    }
+    JS_FreeValue(ctx, obj);
+    return out;
 }
 
 /* Compile code to bytecode (without debug information) into qd_result_* as RES_BYTES. Used at build time. */

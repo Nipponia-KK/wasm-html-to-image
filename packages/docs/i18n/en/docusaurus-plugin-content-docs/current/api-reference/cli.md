@@ -30,7 +30,7 @@ npx wasm-html-to-image <input> [options]
 | `--animation-fps <n>` | - | `15` | Animation sampling fps (used with `--animation`; ~75 frames total cap) |
 | `--animation-loop <n>` | - | `0` (infinite) | How many times the animated WebP / APNG / GIF repeats (`0` = infinite, `1` = play once; used with `--animation`) |
 | `--markdown` | - | Auto-detect | Treat input as Markdown (implied by `.md` / `.markdown` file extension) |
-| `--template <name\|file>` | - | `default` | Document template (`default`, `report`, `book`, `paper`, `compact`, or path to `.json` / `.css`) |
+| `--template <name\|file>` | - | `default` | Document template (`default`, `report`, `proposal`, `book`, `paper`, `compact`, or path to `.json` / `.css`) |
 | `--list-templates` | - | - | List available bundled templates and exit |
 | `--page-size <size>` | - | From template | Page size (`A3`, `A4`, `A5`, `B4`, `B5`, `Letter`, or two lengths like `"210mm 297mm"`) |
 | `--accent <color>` | - | From template | Accent color for headings, links, and cover elements (e.g. `"#c2410c"`) |

@@ -36,7 +36,7 @@ npx wasm-html-to-image <input> [options]
 | `--animation-fps <n>` | - | `15` | アニメーションのサンプリング fps（`--animation` 指定時に有効。上限約 75 フレーム） |
 | `--animation-loop <n>` | - | `0`（無限） | アニメーション WebP / APNG / GIF の再生回数（`0` = 無限、`1` = 1 回だけ。`--animation` 指定時に有効） |
 | `--markdown` | - | 自動判別 | 入力を Markdown として処理（`.md` / `.markdown` 拡張子のファイル入力時は自動で有効） |
-| `--template <name\|file>` | - | `default` | ドキュメントのテンプレート指定（組み込みの `default`, `report`, `book`, `paper`, `compact`、または `.json` / `.css` ファイル） |
+| `--template <name\|file>` | - | `default` | ドキュメントのテンプレート指定（組み込みの `default`, `report`, `proposal`, `book`, `paper`, `compact`、または `.json` / `.css` ファイル） |
 | `--list-templates` | - | - | 利用可能なテンプレート一覧を表示して終了 |
 | `--page-size <size>` | - | テンプレート依存 | ページサイズ（`A3`, `A4`, `A5`, `B4`, `B5`, `Letter`、または `"210mm 297mm"` のような 2 つの長さ） |
 | `--accent <color>` | - | テンプレート依存 | リンク、見出し、表紙などのアクセントカラー（例: `"#c2410c"`） |

@@ -4,14 +4,15 @@ import { ImagePlayground } from "./ImagePlayground";
 
 // The Markdown mode brings marked, highlight.js and (on demand) KaTeX: load it only when it is opened.
 const MarkdownPlayground = lazy(() => import("./MarkdownPlayground"));
+const MermaidPlayground = lazy(() => import("./MermaidPlayground"));
 
-type Tab = "html" | "image" | "markdown";
+type Tab = "html" | "image" | "markdown" | "mermaid";
 
 export const App: React.FC = () => {
   const [tab, setTab] = useState<Tab>(() => {
     const params = new URLSearchParams(window.location.search);
     const mode = params.get("mode");
-    return mode === "image" || mode === "markdown" ? mode : "html";
+    return mode === "image" || mode === "markdown" || mode === "mermaid" ? mode : "html";
   });
 
   useEffect(() => {
@@ -66,6 +67,16 @@ export const App: React.FC = () => {
             >
               Markdown to PDF
             </button>
+            <button
+              onClick={() => setTab("mermaid")}
+              className={`px-4 py-1.5 rounded-md transition-colors cursor-pointer ${
+                tab === "mermaid"
+                  ? "bg-white text-blue-600 font-semibold shadow-xs"
+                  : "text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              Mermaid
+            </button>
           </nav>
         </div>
         <div className="flex items-center gap-4 text-sm">
@@ -86,6 +97,11 @@ export const App: React.FC = () => {
         {tab === "markdown" && (
           <Suspense fallback={<p className="p-6 text-sm text-gray-500">Loading…</p>}>
             <MarkdownPlayground />
+          </Suspense>
+        )}
+        {tab === "mermaid" && (
+          <Suspense fallback={<p className="p-6 text-sm text-gray-500">Loading…</p>}>
+            <MermaidPlayground />
           </Suspense>
         )}
       </main>

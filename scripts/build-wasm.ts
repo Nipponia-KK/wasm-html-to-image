@@ -148,6 +148,11 @@ if (action === "configure") {
     process.exit(1);
   }
 
+  // `--dev` drops link-time optimisation (see cmake/wasm-flags.cmake); the flag is re-applied on every
+  // build so switching between dev and release only rebuilds what the flags touch.
+  const dev = process.argv.includes("--dev") ? "ON" : "OFF";
+  run(`cmake -DWASM_DEV_BUILD=${dev} .`, buildDir);
+
   if (useNinja) {
     run("ninja", buildDir);
   } else {

@@ -344,11 +344,15 @@ namespace litehtml
 
 	inline std::shared_ptr<render_item> element::get_render_item()
 	{
-		if(m_renders.empty())
+		// the first render item that is still alive (an earlier layout's item may have expired)
+		for(const auto& weak_ri : m_renders)
 		{
-			return nullptr;
+			if(auto ri = weak_ri.lock())
+			{
+				return ri;
+			}
 		}
-		return m_renders.front().lock();
+		return nullptr;
 	}
 
 	inline void element::set_text(const char* /*text*/)

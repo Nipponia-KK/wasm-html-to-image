@@ -14,12 +14,13 @@ title: Markdown 変換 (PDF / 画像)
 ## 主な機能
 
 - **`markdownToDocument()` & `markdownToHtml()`**: Markdown から HTML および PDF 用オプション（ヘッダー、フッター、タイトル等）を生成。
-- **テンプレートシステム**: 5 つの組み込みテンプレート（`default`, `report`, `book`, `paper`, `compact`）を提供。CSS を書かずにプロ品質のレイアウトが可能。
+- **テンプレートシステム**: 6 つの組み込みテンプレート（`default`, `report`, `proposal`, `book`, `paper`, `compact`）を提供。CSS を書かずにプロ品質のレイアウトが可能。
 - **自動目次（TOC）とページ番号連携**: 見出しから目次ページを自動生成。PDF レンダラーと連携して正確な開始ページ番号を自動挿入。
 - **PDF ブックマーク（アウトライン）自動生成**: `h1`〜`h6` 見出しから PDF ビューワーの目次ツリー（アウトライン）を自動構築。
 - **スマートな改ページ制御**: 見出し直後の孤立改ページ防止（`break-after: avoid`）やコードブロック・表の分断防止。
 - **YAML Front Matter**: 文書先頭のメタデータ（タイトル、著者、テンプレート、余白、スタンプ等）を自動解釈。
 - **シンタックスハイライト**: highlight.js を内蔵し、20 種類以上の主要言語のコードブロックを色分け表示。
+- **Mermaid 図**: ` ```mermaid ` をフローチャート・シーケンス・状態・クラス・ER・グラフとしてエンジン内で描画。
 - **KaTeX 数式レンダリング (`/markdown-math`)**: インライン `$…$` およびブロック `$$…$$` 数式を高精度に組版。
 
 ---
@@ -101,6 +102,7 @@ const { data } = await render({
 | :--- | :--- | :--- |
 | `default` | Web 画像・クイック PDF | GitHub 風のクリーンなスタイル |
 | `report` | ビジネスレポート・仕様書 | A4、表紙、目次、アクセントカラー適用、ヘッダーにタイトル、フッターに著者とページ番号（`n / N`） |
+| `proposal` | 提案書・見積書 | A4、表紙、セクション見出しにアクセントバー、表ヘッダーをアクセント色で塗り、引用を強調ボックス化、フッターにタイトルとページ番号 |
 | `book` | 書籍・長文ドキュメント | A5、明朝/ローマン（serif）、両端揃え、各章（`h1`）ごとに改ページ、表紙、目次、フッターにページ番号 |
 | `paper` | 論文・学術・技術ノート | A4、serif、両端揃え、引き締まった行送り、フッターにページ番号 |
 | `compact` | チートシート・メモ | 12px 文字、12mm 余白、表紙・目次なし |
@@ -177,6 +179,83 @@ await render({
 ```
 
 ---
+
+## Mermaid 図
+
+` ```mermaid ` のコードブロックは、エンジンが自前でベクター描画します（ブラウザや外部ライブラリは不要で、PDF でも文字が選択できるベクターのままです）。
+
+````markdown
+```mermaid
+graph LR
+  A[受注] --> B{在庫あり?}
+  B -->|はい| C[出荷]
+  B -->|いいえ| D[発注]
+```
+````
+
+| 図 | 書き出し |
+| :--- | :--- |
+| フローチャート | `graph` / `flowchart` |
+| シーケンス図 | `sequenceDiagram` |
+| 状態遷移図 | `stateDiagram-v2` |
+| クラス図 | `classDiagram` |
+| ER 図 | `erDiagram` |
+| 棒・折れ線グラフ | `xychart-beta` |
+| 円グラフ | `pie` |
+| ガントチャート | `gantt` |
+| マインドマップ | `mindmap` |
+| タイムライン | `timeline` |
+| ユーザージャーニー | `journey` |
+| 四象限チャート | `quadrantChart` |
+| Git グラフ | `gitGraph` |
+| カンバン | `kanban` |
+| パケット図 | `packet-beta` |
+| サンキー図 | `sankey-beta` |
+| 要求図 | `requirementDiagram` |
+| ブロック図 | `block-beta`（入れ子のブロックは未対応） |
+| C4 図 | `C4Context` / `C4Container` / `C4Component` / `C4Dynamic` / `C4Deployment` |
+| アーキテクチャ図 | `architecture-beta` |
+| ベン図 | `venn-beta` |
+| 特性要因図（フィッシュボーン） | `ishikawa-beta` |
+| ツリー表示 | `treeView-beta` |
+| ツリーマップ | `treemap-beta` |
+| レーダーチャート | `radar-beta` |
+| バージョン表示 | `info` |
+
+- 色はテーマ（`light` / `dark`）に合わせて自動で決まります。
+- 図はページをまたいで分断されません。
+- `accTitle: 題名` と `accDescr: 説明`（複数行は `accDescr { ... }`）は、図には描かず、SVG の `<title>` と `<desc>` として出力します。スクリーンリーダーなどが読み上げます。
+- `mermaid: false` を渡すと、通常のコードブロックとして表示します。
+- 未対応の図種（`zenuml` など）や構文エラーは、図の位置にエラー枠が表示されます。
+
+### JavaScript から SVG・画像として取得する
+
+`renderMermaid()` は、図のソースから SVG 文字列または画像を返します（図の大きさに合わせて自動でサイズが決まります）。
+
+```typescript
+import { renderMermaid } from "wasm-html-to-image";
+
+const { data: svg } = await renderMermaid("graph LR\n  A --> B"); // SVG 文字列
+const { data: png } = await renderMermaid("graph LR\n  A --> B", {
+  format: "png", // "svg"（既定）, "png", "webp", "pdf" など
+  theme: "dark", // "light"（既定）| "dark"
+});
+```
+
+| オプション | 既定値 | 説明 |
+| :--- | :--- | :--- |
+| `format` | `"svg"` | 出力形式。`"svg"` は文字列、それ以外は `Uint8Array` |
+| `theme` | `"light"` | 配色。`light`、`dark`、`neutral`、`forest`、`nord`、`dracula`、`solarized-light`、`solarized-dark`、`rose-pine`、`sepia` |
+| `padding` | `16` | 図の周りの余白（px） |
+| `width` | 図の幅 + 余白 | 画像の幅（px） |
+| `background` | SVG は透明、画像はテーマの背景色 | ページの背景（CSS の色） |
+| `accent` | テーマから算出 | 矢印やバーの色 |
+| `directives` | `false` | 本文の `%%{init: {...}}%%` と frontmatter の `config:`（`theme`、`themeVariables`）を反映します |
+| `mode` | `"strict"` | 誤りの許容度。`"compat"` は図種名の大文字小文字、BOM・CRLF、閉じ忘れた `end` / `}` を許し、`"recover"` はさらに図種名の綴り違いを直し、読めない行を飛ばします |
+
+`strict` でも、図種名が綴り違いのときは、エラー枠に「`flowchart` のことですか?」と候補が表示されます。ページの CSS からテーマを選ぶときは `--mermaid-theme: nord` を使い、`--mermaid-bg` などの個別の色はその上に重ねて指定できます。モードは `--mermaid-mode: compat`（または `recover`）を使います。
+
+Workers 向けのエントリ（`/workerd`、`/edge-light`）では、`renderMermaidWith((options) => render(options, wasm), source, options)` を使います。HTML ページとして使いたい場合は `mermaidToHtml(source, options)` が、図を 1 つ含む HTML を返します。
 
 ## KaTeX 数式組版 (`/markdown-math`)
 

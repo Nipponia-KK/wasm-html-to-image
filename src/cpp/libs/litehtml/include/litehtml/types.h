@@ -413,6 +413,7 @@ namespace litehtml
                 pixel_t         descent = 0;            // The distance from the baseline to the bottom of a line of text.
                 pixel_t         x_height = 0;           // Height of the symbol x
                 pixel_t         ch_width = 0;           // Width of the symbol 0
+                pixel_t         line_height = 0;        // The element's computed line-height (set by css_properties::compute); the lh base
                 bool            draw_spaces = true;     // True to call draw text function for spaces. If False, just use space width without draw.
                 pixel_t         sub_shift = 0;          // The baseline shift for subscripts.
                 pixel_t         super_shift = 0;        // The baseline shift for superscripts.
@@ -898,7 +899,7 @@ namespace litehtml
                 blend_mode_luminosity
         };
 
-#define  css_units_strings      "none;%;in;cm;mm;em;ex;pt;pc;px;vw;vh;vmin;vmax;rem;ch;fr"
+#define  css_units_strings      "none;%;in;cm;mm;em;ex;pt;pc;px;vw;vh;vmin;vmax;rem;ch;fr;lh;rlh"
 
 	enum css_units : byte // see css_length
 	{
@@ -919,6 +920,8 @@ namespace litehtml
 		css_units_rem,
 		css_units_ch,
 		css_units_fr,
+		css_units_lh,
+		css_units_rlh,
 	};
 
 #define  background_attachment_strings  "scroll;fixed"
@@ -1312,6 +1315,11 @@ namespace litehtml
                 std::shared_ptr<render_item>    el;
                 int                                                             context;
                 pixel_t                                                 min_width;
+                // The block whose layout pass placed this float, and the order within that
+                // pass: when the pass runs again, re-placing a float invalidates the entries
+                // the previous run placed after it (they belong to the trial geometry).
+                const render_item*              scope = nullptr;
+                unsigned int                    seq = 0;
 
                 floated_box() = default;
                 floated_box(const floated_box& val)
@@ -1322,6 +1330,8 @@ namespace litehtml
                         el = val.el;
                         context = val.context;
                         min_width = val.min_width;
+                        scope = val.scope;
+                        seq = val.seq;
                 }
 
                 floated_box& operator=(const floated_box& val) = default;
@@ -1334,6 +1344,8 @@ namespace litehtml
                         el = std::move(val.el);
                         context = val.context;
                         min_width = val.min_width;
+                        scope = val.scope;
+                        seq = val.seq;
                 }
                 void operator=(floated_box&& val)
                 {
@@ -1343,6 +1355,8 @@ namespace litehtml
                         el = std::move(val.el);
                         context = val.context;
                         min_width = val.min_width;
+                        scope = val.scope;
+                        seq = val.seq;
                 }
         };
 

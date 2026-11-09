@@ -36,3 +36,53 @@ target_include_directories(test_animation_sampler PRIVATE "${CMAKE_CURRENT_SOURC
 target_compile_features(test_animation_sampler PRIVATE cxx_std_20)
 
 add_test(NAME animation_sampler COMMAND test_animation_sampler)
+
+# core/svg_paint_utils.h (color-mix evaluation, marker geometry) is standard-library only
+add_executable(test_svg_paint_utils test_svg_paint_utils.cpp)
+target_include_directories(test_svg_paint_utils PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp")
+target_compile_features(test_svg_paint_utils PRIVATE cxx_std_20)
+
+add_test(NAME svg_paint_utils COMMAND test_svg_paint_utils)
+
+# mermaid/: diagrams drawn by the engine (standard library only)
+add_library(mermaid_core STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/mermaid.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/flowchart.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/layered.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/sequence.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/state.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/classdiagram.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/erdiagram.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/xychart.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/pie.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/gantt.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/mindmap.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/timeline.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/journey.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/quadrant.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/gitgraph.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/kanban.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/packet.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/sankey.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/requirement.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/block.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/treemap.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/radar.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/info.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/architecture.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/c4.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/venn.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/ishikawa.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/treeview.cpp")
+target_include_directories(mermaid_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp")
+target_compile_features(mermaid_core PUBLIC cxx_std_20)
+if(MSVC)
+    target_compile_options(mermaid_core PRIVATE /utf-8)
+endif()
+
+add_executable(mermaid_cli mermaid_cli.cpp)
+target_link_libraries(mermaid_cli PRIVATE mermaid_core)
+
+add_executable(test_mermaid test_mermaid.cpp)
+target_link_libraries(test_mermaid PRIVATE mermaid_core)
+add_test(NAME mermaid COMMAND test_mermaid)

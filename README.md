@@ -220,6 +220,7 @@ Highlighted languages: bash/shell, c, c++, c#, css/scss, diff, dockerfile, go, h
 | :--- | :--- | :--- |
 | `default` | images, quick PDFs | the GitHub-like page |
 | `report` | business documents | A4, cover, contents, headings and links in the accent colour, the title in the header, author and `n / N` in the footer |
+| `proposal` | proposals, quotations | A4, cover, accent bars on sections, tinted table headers, call-out quotes |
 | `book` | books, long reading | A5, serif, justified, each chapter (`h1`) on a new page, a cover and contents, the page number in the footer |
 | `paper` | papers, technical notes | A4, serif, justified, tight leading, the page number in the footer |
 | `compact` | notes, cheat sheets | 12px text, 12mm margins, no cover or contents |

@@ -1750,6 +1750,14 @@ namespace litehtml
 
     case _fill_:
     case _stroke_:
+    {
+      // The stylesheet has no whitespace tokens, so `color-mix(in srgb, #000 50%, #fff)` would run together
+      // ("insrgb"): a paint that mixes colours is kept with its separators.
+      string repr = get_repr(value);
+      if (repr.find("color-mix(") != string::npos) repr = get_repr(value, 0, -1, true);
+      add_parsed_property(name, property_value(repr, important, false, m_layer, m_specificity));
+      break;
+    }
     case _margin_trim_:
     case __moz_orient_:
     case __webkit_appearance_:

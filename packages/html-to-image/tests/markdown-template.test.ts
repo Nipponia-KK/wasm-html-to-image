@@ -37,12 +37,12 @@ describe("front matter", () => {
 describe("templates", () => {
   it("lists the bundled templates with a description each", () => {
     const names = listTemplates().map((t) => t.name);
-    expect(names).toEqual(["default", "report", "book", "paper", "compact"]);
+    expect(names).toEqual(["default", "report", "proposal", "book", "paper", "compact"]);
     for (const t of listTemplates()) expect(t.description.length).toBeGreaterThan(10);
   });
 
   it("an unknown template name is an error that lists the choices", () => {
-    expect(() => resolveTemplate("nope")).toThrow(/Choose from: default, report, book, paper, compact/);
+    expect(() => resolveTemplate("nope")).toThrow(/Choose from: default, report, proposal, book, paper, compact/);
     expect(() => markdownToHtml("x", { template: "nope" })).toThrow(/unknown template/);
   });
 

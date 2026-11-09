@@ -83,6 +83,11 @@ export interface MarkdownOptions {
   title?: string;
   /** Highlight fenced code blocks that name a known language. Defaults to true. */
   highlight?: boolean;
+  /**
+   * Draw ```` ```mermaid ```` fences as diagrams (flowchart, sequence, state, class, ER and xy charts, drawn by the engine
+   * itself). Defaults to true; `false` leaves them as code blocks.
+   */
+  mermaid?: boolean;
   /** Strip a leading `---` YAML front matter block (and read its `title`). Defaults to true. */
   frontMatter?: boolean;
   /**
@@ -219,6 +224,8 @@ body { color: ${c.fg}; font-family: ${type.font}; font-size: ${type.size}px; lin
 .markdown-body blockquote > *:last-child { margin-bottom: 0; }
 .markdown-body code { padding: 0.2em 0.4em; font-family: ${type.mono}; font-size: 85%; background: ${c.codeBg}; border-radius: ${type.radius}px; }
 .markdown-body pre { padding: 16px; overflow: hidden; font-size: 85%; line-height: 1.45; background: ${c.codeBg}; border-radius: ${type.radius}px; text-align: left; }
+.markdown-body .diagram { margin: 0 0 16px; text-align: center; }
+.markdown-body .mermaid { display: inline-block; margin: 0; color: ${c.fg}; --mermaid-fg: ${c.fg}; --mermaid-bg: ${c.bg}; --mermaid-border: ${c.border}; --mermaid-surface: ${c.codeBg}; }
 .markdown-body pre code { padding: 0; font-size: 100%; background: transparent; white-space: pre; }
 .markdown-body hr { height: 0; margin: 24px 0; border: 0; border-top: 4px solid ${c.border}; }
 .markdown-body img { max-width: 100%; }
@@ -238,7 +245,7 @@ body { color: ${c.fg}; font-family: ${type.font}; font-size: ${type.size}px; lin
 .hljs-strong { font-weight: 600; }
 .hljs-addition { color: ${c.tag}; background: ${c.add}; }
 .hljs-deletion { color: ${c.keyword}; background: ${c.del}; }
-.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { break-after: avoid; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4, .markdown-body h5, .markdown-body h6 { break-after: avoid; break-inside: avoid; }
 .markdown-body .toc { margin: 0 0 24px; break-after: page; }
 .markdown-body .toc-title { margin: 0 0 12px; font-size: 1.5em; font-weight: 600; line-height: 1.25; }
 .markdown-body .toc-item { display: flex; align-items: baseline; padding: 2px 0; color: ${c.fg}; text-decoration: none; }
@@ -248,7 +255,7 @@ body { color: ${c.fg}; font-family: ${type.font}; font-size: ${type.size}px; lin
 .markdown-body .toc-l4, .markdown-body .toc-l5, .markdown-body .toc-l6 { padding-left: 3.75em; }
 .markdown-body .toc-leader { flex: 1; min-width: 12px; margin: 0 6px; border-bottom: 1px dotted ${c.muted}; }
 .markdown-body .toc-page { min-width: 2.5em; text-align: right; color: ${c.muted}; }
-.markdown-body pre, .markdown-body table, .markdown-body blockquote, .markdown-body img, .markdown-body tr { break-inside: avoid; }
+.markdown-body pre, .markdown-body .diagram,.markdown-body table, .markdown-body blockquote, .markdown-body img, .markdown-body tr { break-inside: avoid; }
 `;
 }
 
@@ -364,15 +371,14 @@ export function markdownToDocument(markdown: string, options: MarkdownOptions = 
     entries.push({ level: depth, id, html: inner });
     return `<h${depth} id="${id}">${inner}</h${depth}>\n`;
   };
-  if (options.highlight !== false) {
-    renderer.code = ({ text, lang }) => {
-      const name = (lang ?? "").trim().split(/\s+/)[0];
-      const body = name && highlighter.getLanguage(name)
-        ? highlighter.highlight(text, { language: name, ignoreIllegals: true }).value
-        : escapeHtml(text);
-      return `<pre><code${name ? ` class="language-${escapeHtml(name)}"` : ""}>${body}\n</code></pre>\n`;
-    };
-  }
+  renderer.code = ({ text, lang }) => {
+    const name = (lang ?? "").trim().split(/\s+/)[0];
+    if (name === "mermaid" && options.mermaid !== false) return `<div class="diagram"><div class="mermaid">${escapeHtml(text)}</div></div>\n`;
+    const body = options.highlight !== false && name && highlighter.getLanguage(name)
+      ? highlighter.highlight(text, { language: name, ignoreIllegals: true }).value
+      : escapeHtml(text);
+    return `<pre><code${name ? ` class="language-${escapeHtml(name)}"` : ""}>${body}\n</code></pre>\n`;
+  };
   const parser = options.math ? new Marked(mathExtension(options.math)) : marked;
   const text = parser.parse(source, { async: false, gfm: true, renderer }) as string;
 

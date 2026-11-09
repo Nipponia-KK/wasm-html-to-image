@@ -497,7 +497,15 @@ void litehtml::flex_line::init(pixel_t container_main_size, bool fit_container,
             child_cb.size_mode = (wm.is_vertical() ? containing_block_context::size_mode_exact_width
                                                    : containing_block_context::size_mode_exact_height) |
                                  containing_block_context::size_mode_measure;
-            if (!wm.is_vertical() && self_size.height.type == containing_block_context::cbc_value_type_auto) {
+            // The pinned block size is the item's resolved main size. It is a definite size for
+            // percentage resolution inside the item only when the container's block size is
+            // definite: a content-derived container height (auto / fit-content property, an
+            // auto cb height, or a cyclic one) keeps percentage heights inside the item cyclic
+            // even though the size arrives as a plain number.
+            if (!wm.is_vertical() &&
+                (self_size.height.type == containing_block_context::cbc_value_type_auto ||
+                 self_size.height_cyclic ||
+                 (item->el->parent() && item->el->parent()->css().get_height().is_predefined()))) {
                 child_cb.size_mode |= containing_block_context::size_mode_cyclic_height;
             }
 

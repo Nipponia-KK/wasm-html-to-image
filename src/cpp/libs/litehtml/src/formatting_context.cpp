@@ -1,8 +1,9 @@
 #include "render_item.h"
 #include "types.h"
 #include "formatting_context.h"
+#include <algorithm>
 
-void litehtml::formatting_context::add_float(const std::shared_ptr<render_item> &el, pixel_t min_width, int context)
+void litehtml::formatting_context::add_float(const std::shared_ptr<render_item> &el, pixel_t min_width, int context, const render_item* scope)
 {
 	floated_box fb;
     satoru::WritingModeContext wm(m_writing_mode, 0, 0); // Temporary context for mapping
@@ -24,6 +25,8 @@ void litehtml::formatting_context::add_float(const std::shared_ptr<render_item> 
 	fb.float_side	= el->src_el()->css().get_float();
 	fb.clear_floats	= el->src_el()->css().get_clear();
 	fb.el			= el;
+	fb.scope		= scope;
+	fb.seq			= ++m_float_seq;
 	fb.context		= context;
 	fb.min_width	= min_width;
 
@@ -76,33 +79,108 @@ void litehtml::formatting_context::add_float(const std::shared_ptr<render_item> 
 	}
 }
 
-litehtml::pixel_t litehtml::formatting_context::place_measured_float(pixel_t top, pixel_t inline_size,
-																 pixel_t block_size, element_float side,
-																 pixel_t container_inline_size)
+void litehtml::formatting_context::remove_float(const std::shared_ptr<render_item> &el,
+												const render_item* scope)
 {
+	// The float's own entry goes, and so does every entry the same layout pass placed after
+	// it: a repeated pass re-runs its children in order, so those entries are stale copies
+	// from the previous run and would push the re-placed floats aside.
+	unsigned int old_seq = 0;
+	if (scope)
+	{
+		for(const auto& fb : m_floats_left)  if (fb.el == el && fb.scope == scope) old_seq = fb.seq;
+		for(const auto& fb : m_floats_right) if (fb.el == el && fb.scope == scope) old_seq = fb.seq;
+	}
+	auto stale = [&el, scope, old_seq](const floated_box& fb) {
+		return fb.el == el || (old_seq != 0 && fb.scope == scope && fb.seq > old_seq);
+	};
+	m_floats_left.remove_if(stale);
+	m_floats_right.remove_if(stale);
+	m_cache_line_left.invalidate();
+	m_cache_line_right.invalidate();
+}
+
+litehtml::pixel_t litehtml::formatting_context::place_measured_float(const render_item* key,
+																 const render_item* scope, pixel_t top,
+																 pixel_t inline_size, pixel_t block_size,
+																 element_float side,
+																 pixel_t container_inline_size,
+																 pixel_t* out_extent)
+{
+	// A repeated measure of the same float replaces its earlier record, and every record the
+	// same pass placed after it goes with it: the pass re-runs its children in order, so those
+	// records are stale copies from the previous run and would push the float aside.
+	if (key)
+	{
+		unsigned int old_seq = 0;
+		for(const auto& fb : m_measure_floats)
+			if (fb.key == key && fb.scope == scope) old_seq = fb.seq;
+		m_measure_floats.erase(std::remove_if(m_measure_floats.begin(), m_measure_floats.end(),
+			[key, scope, old_seq](const measured_float& fb) {
+				return fb.key == key || (old_seq != 0 && fb.scope == scope && fb.seq > old_seq);
+			}), m_measure_floats.end());
+	}
 	// A float is placed as high as it fits beside the floats already on that line; one that does not
 	// fit is pushed below them (Blink's LayoutBlockFlow::positionNewFloats does the same with the
 	// real ledger). In a measure pass the floats are not in the ledger, so their extent is tracked
-	// here instead: without it a float below another one was reported as tall as itself only.
-	const pixel_t left = side == float_right ? container_inline_size - inline_size : 0;
-	const pixel_t right = left + inline_size;
-	bool moved = true;
-	while (moved)
+	// here instead: floats on the same line accumulate from their side, so the line's extent is the
+	// sum of their widths -- a shrink-to-fit container holding two floats is as wide as both.
+	while (true)
 	{
-		moved = false;
+		pixel_t limit_left = 0;
+		pixel_t limit_right = container_inline_size;
 		for(const auto& fb : m_measure_floats)
 		{
+			// Records are kept in the measuring block's local frame, so only floats of the
+			// same block (same scope) can share this float's line; another block's records
+			// are in a different frame and must not constrain or extend this one.
+			if (fb.scope != scope) continue;
 			if (top >= fb.bottom || top + block_size <= fb.top) continue;
-			if (right <= fb.left || fb.right <= left) continue;
-			top = fb.bottom;
-			moved = true;
-			break;
+			if (fb.side == float_left)	limit_left = std::max(limit_left, fb.right);
+			else						limit_right = std::min(limit_right, fb.left);
 		}
+		pixel_t left, right;
+		if (side == float_left)	{ left = limit_left; right = left + inline_size; }
+		else					{ right = limit_right; left = right - inline_size; }
+		const bool fits = side == float_left ? (right <= limit_right + 0.01f)
+											 : (left >= limit_left - 0.01f);
+		if (!fits)
+		{
+			// Push below the nearest float that blocks this line; if nothing blocks it (the float
+			// alone is wider than the container) it stays and overflows.
+			pixel_t new_top = -1;
+			for(const auto& fb : m_measure_floats)
+			{
+				if (fb.scope != scope) continue;
+				if (top >= fb.bottom || top + block_size <= fb.top) continue;
+				if (new_top < 0 || fb.bottom < new_top) new_top = fb.bottom;
+			}
+			if (new_top > top)
+			{
+				top = new_top;
+				continue;
+			}
+		}
+		measured_float fb{ top, top + block_size, left, right, side, key, scope, ++m_measure_seq };
+		m_measure_floats.push_back(fb);
+		if (fb.bottom > m_measured_float_bottom) m_measured_float_bottom = fb.bottom;
+		if (out_extent)
+		{
+			// The line's intrinsic extent spans both sides: floats from the opposite side that
+			// share the line add their extent to this float's.
+			pixel_t opp = 0;
+			for(const auto& fb : m_measure_floats)
+			{
+				if (fb.scope != scope) continue;
+				if (fb.side == side) continue;
+				if (top >= fb.bottom || top + block_size <= fb.top) continue;
+				opp = std::max(opp, fb.side == float_left ? fb.right
+														  : container_inline_size - fb.left);
+			}
+			*out_extent = (side == float_left ? right : container_inline_size - left) + opp;
+		}
+		return top;
 	}
-	measured_float fb{ top, top + block_size, left, right };
-	m_measure_floats.push_back(fb);
-	if (fb.bottom > m_measured_float_bottom) m_measured_float_bottom = fb.bottom;
-	return top;
 }
 
 litehtml::pixel_t litehtml::formatting_context::get_floats_height(element_float el_float) const
@@ -403,6 +481,45 @@ litehtml::pixel_t litehtml::formatting_context::find_next_line_top(pixel_t top, 
 		}
 	}
 	return new_top - m_current_block_pos;
+}
+
+litehtml::pixel_t litehtml::formatting_context::find_next_line_top_measured(const render_item* scope, pixel_t top, pixel_t width, pixel_t block_size, pixel_t container_inline_size)
+{
+	// The measured-float counterpart of find_next_line_top: measure passes keep floats
+	// out of the real ledger, so a block-formatting-context child that must move below
+	// a float finds no floats there and its container's measured height loses the
+	// float's whole extent (a float followed by a grid sibling measured as tall as
+	// the grid alone). Records are in the measuring block's local frame, like top.
+	pixel_vector points;
+	for(const auto& fb : m_measure_floats)
+	{
+		if (fb.scope != scope) continue;
+		if (fb.top >= top && find(points.begin(), points.end(), fb.top) == points.end())
+			points.push_back(fb.top);
+		if (fb.bottom >= top && find(points.begin(), points.end(), fb.bottom) == points.end())
+			points.push_back(fb.bottom);
+	}
+	if (points.empty()) return top;
+	sort(points.begin(), points.end(), std::less<pixel_t>());
+	pixel_t new_top = points.back();
+	for(auto pt : points)
+	{
+		pixel_t limit_left = 0;
+		pixel_t limit_right = container_inline_size;
+		for(const auto& fb : m_measure_floats)
+		{
+			if (fb.scope != scope) continue;
+			if (pt >= fb.bottom || pt + block_size <= fb.top) continue;
+			if (fb.side == float_left)	limit_left = std::max(limit_left, fb.right);
+			else						limit_right = std::min(limit_right, fb.left);
+		}
+		if (limit_right - limit_left >= width)
+		{
+			new_top = pt;
+			break;
+		}
+	}
+	return new_top;
 }
 
 void litehtml::formatting_context::update_floats(pixel_t dy, const std::shared_ptr<render_item> &parent)

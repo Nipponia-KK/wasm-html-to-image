@@ -579,13 +579,47 @@ void litehtml::render_item_inline_context::place_inline(std::unique_ptr<line_box
         if(!m_line_boxes.empty())
         {
             line_top = m_line_boxes.back()->top();
+            // A float that occurs mid-line joins the line only if it fits
+            // beside the content already on it; otherwise it drops below the
+            // line and the content stays put (Blink). place_float alone would
+            // put it at the line's edge and fix_line_width would then push the
+            // line's content into the remaining segment, however narrow.
+            if (!(self_size.size_mode & containing_block_context::size_mode_measure) &&
+                self_size.mode == writing_mode_horizontal_tb)
+            {
+                const pixel_t avail = self_size.render_inline_size();
+                // The line's content width, not counting trailing collapsible
+                // whitespace: a space before the float hangs at the line end
+                // and does not keep the float from joining the line.
+                pixel_t used_w = 0;
+                {
+                    const auto& items = m_line_boxes.back()->items();
+                    for (auto it = items.rbegin(); it != items.rend(); ++it)
+                    {
+                        if (used_w == 0 &&
+                            ((*it)->get_el()->src_el()->is_white_space() || (*it)->get_el()->src_el()->is_break()))
+                            continue;
+                        used_w += (*it)->width();
+                    }
+                }
+                if (used_w > 0)
+                {
+                    int float_mode = self_size.size_mode & (containing_block_context::size_mode_content | containing_block_context::size_mode_min_content);
+                    if (item->get_el()->src_el()->css().get_width().is_predefined()) float_mode |= containing_block_context::size_mode_content;
+                    const pixel_t float_w = item->get_el()->measure(self_size.new_inline_size(avail, float_mode), fmt_ctx);
+                    if (used_w + float_w > avail + 0.01f)
+                        line_top += m_line_boxes.back()->height();
+                }
+            }
         }
         pixel_t ret = place_float(item->get_el(), line_top, self_size, fmt_ctx);
 		if((self_size.size_mode & containing_block_context::size_mode_measure) &&
 		   self_size.mode == writing_mode_horizontal_tb &&
 		   item->get_el()->src_el()->css().get_clear() == clear_none)
 		{
-			m_measure_float_width += ret;
+			// ret is the float's line extent, not its own width: the latest float's
+			// extent is the line's float total.
+			m_measure_float_width = ret;
 		}
 		if(ret > m_max_line_width)
 		{

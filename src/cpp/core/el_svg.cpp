@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <list>
+#include <memory>
+#include <set>
 #include <sstream>
 
 #include "bridge/magic_tags.h"
@@ -15,12 +18,39 @@
 #include "libs/litehtml/include/litehtml/render_image.h"
 #include "libs/litehtml/include/litehtml/render_item.h"
 #include "modules/skresources/include/SkResources.h"
+#include "modules/skshaper/include/SkShaper_factory.h"
+#include "modules/skshaper/include/SkShaper_harfbuzz.h"
+#include "modules/skunicode/include/SkUnicode.h"
 #include "modules/svg/include/SkSVGDOM.h"
+#include "svg_paint_utils.h"
+#include "text_utils.h"
 #include "svg_tag_utils.h"
 
 namespace litehtml {
 
 namespace {
+
+// The characters of the <text> inside an svg. Layout never sees them (SkSVGDOM draws them), so without this
+// the font slices that cover them (Noto Sans JP comes in unicode-range slices) are never fetched and the
+// glyphs come out as boxes.
+void collect_svg_text_codepoints(const std::list<std::shared_ptr<element>>& list, std::set<char32_t>& out) {
+    for (auto const& e : list) {
+        if (e->is_comment()) continue;
+        if (e->is_text()) {
+            string text;
+            e->get_text(text);
+            const char* p = text.c_str();
+            while (*p) {
+                char32_t cp = satoru::decode_utf8_char(&p);
+                if (cp == 0) break;
+                out.insert(cp);
+            }
+            continue;
+        }
+        if (std::string(e->get_tagName()) == "style") continue;
+        collect_svg_text_codepoints(e->children(), out);
+    }
+}
 
 class SatoruImageAsset : public skresources::ImageAsset {
    public:
@@ -57,11 +87,16 @@ class SatoruSvgFontMgr final : public SkFontMgr {
     }
     sk_sp<SkTypeface> onMatchFamilyStyleCharacter(const char family[], const SkFontStyle& style,
                                                   const char*[], int, SkUnichar c) const override {
-        // Prefer the requested family, then any loaded typeface that covers the character (e.g. a
-        // CJK face after a Latin-only one).
-        auto tf = lookup(family, style);
-        if (tf && tf->unicharToGlyph(c) != 0) return tf;
-        if (auto any = m_ctx.fontManager.findTypefaceForCodepoint(c)) return any;
+        // The requested family, then sans-serif: every face of each (the default fonts come in
+        // unicode-range slices, so the first face covers only part of the Latin letters or of the
+        // kanji), then any loaded typeface that covers the character.
+        for (const char* name : {family, "sans-serif"}) {
+            if (!name || !*name) continue;
+            bool fake_bold = false;
+            for (auto& tf : m_ctx.get_typefaces(name, style.weight(), style.slant(), fake_bold))
+                if (tf && tf->unicharToGlyph(c) != 0) return weighted(tf, style.weight());
+        }
+        if (auto any = m_ctx.fontManager.findTypefaceForCodepoint(c)) return weighted(any, style.weight());
         return lookup(family, style);
     }
     sk_sp<SkTypeface> onMakeFromData(sk_sp<SkData> d, int i) const override {
@@ -88,15 +123,48 @@ class SatoruSvgFontMgr final : public SkFontMgr {
         std::string name = family ? family : "";
         if (!name.empty()) {
             auto tfs = m_ctx.get_typefaces(name, style.weight(), slant, fake_bold);
-            if (!tfs.empty() && tfs.front()) return tfs.front();
+            if (!tfs.empty() && tfs.front()) return weighted(tfs.front(), style.weight());
         }
         auto tfs = m_ctx.get_typefaces("sans-serif", style.weight(), slant, fake_bold);
-        if (!tfs.empty() && tfs.front()) return tfs.front();
+        if (!tfs.empty() && tfs.front()) return weighted(tfs.front(), style.weight());
         return m_ctx.fontManager.getDefaultTypeface();
+    }
+
+    // The default fonts are variable: the face for a weight is a clone with that wght (what the HTML text
+    // path does through createSkFont); SkSVGDOM would otherwise draw every weight at the default one.
+    sk_sp<SkTypeface> weighted(sk_sp<SkTypeface> tf, int weight) const {
+        if (!tf) return tf;
+        std::unique_ptr<SkFont> font(m_ctx.fontManager.createSkFont(tf, 12.0f, weight));
+        return font ? font->refTypeface() : tf;
     }
 
     SatoruContext& m_ctx;
     sk_sp<SkFontMgr> m_base;
+};
+
+// SkSVGDOM shapes text with Skia's primitive shaper unless it is given another one, and that shaper takes
+// the font of the FIRST font run for the whole string: a character that font lacks (the second kanji of a
+// word, when the default CJK font comes in unicode-range slices) is drawn as a box. HarfBuzz walks every
+// run, so the fallback manager above is consulted for each character.
+class SatoruSvgShaperFactory final : public SkShapers::Factory {
+   public:
+    explicit SatoruSvgShaperFactory(sk_sp<SkUnicode> unicode) : m_unicode(std::move(unicode)) {}
+
+    std::unique_ptr<SkShaper> makeShaper(sk_sp<SkFontMgr> fallback) override {
+        return SkShapers::HB::ShapeDontWrapOrReorder(m_unicode, std::move(fallback));
+    }
+    // One direction and one script per string: HarfBuzz guesses the segment properties itself.
+    // The run ends at the end of the text: HarfBuzz walks the runs, and an end of 0 never advances.
+    std::unique_ptr<SkShaper::BiDiRunIterator> makeBidiRunIterator(const char*, size_t utf8Bytes, uint8_t level) override {
+        return std::make_unique<SkShaper::TrivialBiDiRunIterator>(level, utf8Bytes);
+    }
+    std::unique_ptr<SkShaper::ScriptRunIterator> makeScriptRunIterator(const char*, size_t utf8Bytes, SkFourByteTag script) override {
+        return std::make_unique<SkShaper::TrivialScriptRunIterator>(script, utf8Bytes);
+    }
+    SkUnicode* getUnicode() override { return m_unicode.get(); }
+
+   private:
+    sk_sp<SkUnicode> m_unicode;
 };
 
 class SatoruResourceProvider : public skresources::ResourceProvider {
@@ -226,6 +294,11 @@ void el_svg::get_content_size(size& sz, pixel_t max_width) {
 
 std::shared_ptr<render_item> el_svg::create_render_item(
     const std::shared_ptr<render_item>& parent_ri) {
+    if (auto* skia = dynamic_cast<container_skia*>(get_document()->container())) {
+        std::set<char32_t> codepoints;
+        collect_svg_text_codepoints(m_children, codepoints);
+        if (!codepoints.empty()) skia->add_used_codepoints(codepoints);
+    }
     auto ret = std::make_shared<render_item_image>(shared_from_this());
     ret->parent(parent_ri);
     return ret;
@@ -238,6 +311,14 @@ std::string trim_copy(const std::string& v) {
     if (b == std::string::npos) return "";
     size_t e = v.find_last_not_of(" \t\r\n");
     return v.substr(b, e - b + 1);
+}
+
+// The text of a custom property's tokens. The stylesheet drops whitespace tokens, so a value whose parts
+// need a separator (`color-mix(in srgb, #000 50%, #fff)`) is written back with spaces; anything else keeps
+// the compact form that plain colours (`rgb(1,2,3)`) need.
+std::string custom_property_text(const css_token_vector& toks) {
+    std::string compact = get_repr(toks);
+    return compact.find("color-mix(") != std::string::npos ? get_repr(toks, 0, -1, true) : compact;
 }
 
 // Resolve var() and light-dark() in a fill/stroke value the way the cascade would. Returns false
@@ -276,7 +357,7 @@ bool resolve_paint(const element* el, const std::string& in, std::string& out, i
             bool ok = false;
             css_token_vector toks;
             if (first.rfind("--", 0) == 0 && el->get_custom_property(_id(first), toks)) {
-                ok = resolve_paint(el, get_repr(toks), piece, depth + 1);
+                ok = resolve_paint(el, custom_property_text(toks), piece, depth + 1);
             }
             if (!ok) {
                 if (comma == std::string::npos) return false;
@@ -296,8 +377,40 @@ bool resolve_paint(const element* el, const std::string& in, std::string& out, i
 std::string css_paint(const element* el, string_id property) {
     const property_value& pv = el->get_property_value(property);
     if (!pv.is<string>()) return "";
+    std::string resolved, out;
+    if (!resolve_paint(el, pv.get<string>(), resolved)) return "";
+    return svgutil::eval_color_functions(resolved, out) ? out : "";
+}
+
+std::string svg_escape_attr(const std::string& v) {
+    std::string out;
+    for (char c : v) {
+        if (c == '&') out += "&amp;";
+        else if (c == '"') out += "&quot;";
+        else if (c == '<') out += "&lt;";
+        else out += c;
+    }
+    return out;
+}
+
+// An attribute value with var(), light-dark() and color-mix() evaluated, since SkSVGDOM reads none of
+// them (SVG generators such as beautiful-mermaid put `fill="var(--_node-fill)"` on every shape).
+// Returns false when the value is invalid at computed-value time: the attribute is then dropped.
+bool resolve_attr(const element* el, const std::string& value, std::string& out) {
+    auto has = [&](const char* f) { return value.find(f) != std::string::npos; };
+    if (!has("var(") && !has("light-dark(") && !has("color-mix(")) {
+        out = value;
+        return true;
+    }
     std::string resolved;
-    return resolve_paint(el, pv.get<string>(), resolved) ? resolved : "";
+    if (!resolve_paint(el, value, resolved)) return false;
+    return svgutil::eval_color_functions(resolved, out);
+}
+
+// The font-family the stylesheets give a text element (`text { font-family: ... }`), or empty.
+std::string css_font_family(const element* el) {
+    const property_value& pv = el->get_property_value(_font_family_);
+    return pv.is<string>() ? pv.get<string>() : "";
 }
 
 }  // namespace
@@ -316,7 +429,13 @@ void el_svg::write_element(std::ostream& os, const element::ptr& el) const {
     if (el->is_text()) {
         string text;
         el->get_text(text);
-        os << text;
+        // the parser has decoded entities; XML needs them back, or "<<x>>" ends the whole document
+        for (char c : text) {
+            if (c == '&') os << "&amp;";
+            else if (c == '<') os << "&lt;";
+            else if (c == '>') os << "&gt;";
+            else os << c;
+        }
         return;
     }
     if (el->is_comment()) return;
@@ -352,6 +471,7 @@ void el_svg::write_element(std::ostream& os, const element::ptr& el) const {
             attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\n'), attr_val.end());
             attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\r'), attr_val.end());
             attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\t'), attr_val.end());
+            if (!resolve_attr(el.get(), attr_val, attr_val)) continue;
 
             if (attr_name == "stroke") {
                 if (stroke_width_is_zero) {
@@ -374,6 +494,10 @@ void el_svg::write_element(std::ostream& os, const element::ptr& el) const {
         if (stroke_width_is_zero && !stroke_attr_written) {
             os << " stroke=\"none\"";
         }
+        if ((tag_name == "text" || tag_name == "tspan") && !el->get_attr("font-family")) {
+            std::string family = css_font_family(el.get());
+            if (!family.empty()) os << " font-family=\"" << svg_escape_attr(family) << "\"";
+        }
     }
 
     auto children = el->children();
@@ -386,6 +510,93 @@ void el_svg::write_element(std::ostream& os, const element::ptr& el) const {
         }
         os << "</" << tag_name << ">";
     }
+    write_markers(os, el, tag_name);
+}
+
+// SkSVGDOM draws no <marker>, so marker-start / marker-end of a line, polyline or polygon are drawn
+// here: the marker's content is copied into a group placed on the first / last vertex.
+const element* el_svg::find_marker(const element_list_t& list, const std::string& id) const {
+    for (auto const& e : list) {
+        if (e->is_text() || e->is_comment()) continue;
+        if (std::string(e->get_tagName()) == "marker") {
+            const char* mid = e->get_attr("id");
+            if (mid && id == mid) return e.get();
+        }
+        if (auto found = find_marker(e->children(), id)) return found;
+    }
+    return nullptr;
+}
+
+void el_svg::write_markers(std::ostream& os, const element::ptr& el, const std::string& tag_name) const {
+    if (tag_name != "line" && tag_name != "polyline" && tag_name != "polygon") return;
+    const char* start_ref = el->get_attr("marker-start");
+    const char* end_ref = el->get_attr("marker-end");
+    if (!start_ref && !end_ref) return;
+
+    std::vector<svgutil::Point> pts;
+    auto num = [&](const char* name) {
+        const char* v = el->get_attr(name);
+        return v ? std::strtod(v, nullptr) : 0.0;
+    };
+    if (tag_name == "line") {
+        pts = {{num("x1"), num("y1")}, {num("x2"), num("y2")}};
+    } else if (const char* points = el->get_attr("points")) {
+        pts = svgutil::parse_points(points);
+    }
+    if (pts.size() < 2) return;
+    const char* sw = el->get_attr("stroke-width");
+    double stroke_width = sw ? std::strtod(sw, nullptr) : 1.0;
+    if (!(stroke_width > 0)) stroke_width = 1.0;
+
+    auto place = [&](const char* ref, bool at_end) {
+        if (!ref) return;
+        std::string r = svgutil::trim(ref);
+        if (r.rfind("url(#", 0) != 0) return;
+        size_t close = r.find(')');
+        if (close == std::string::npos) return;
+        std::string id = svgutil::trim(r.substr(5, close - 5));
+        if (id.size() >= 2 && (id.back() == '"' || id.back() == '\'')) id = id.substr(0, id.size() - 1);
+        const element* marker = find_marker(m_children, id);
+        if (!marker) return;
+
+        auto attr = [&](const char* name, double def) {
+            const char* v = marker->get_attr(name);
+            return v ? std::strtod(v, nullptr) : def;
+        };
+        svgutil::MarkerDef def;
+        def.refX = attr("refx", 0);
+        def.refY = attr("refy", 0);
+        def.markerWidth = attr("markerwidth", 3);
+        def.markerHeight = attr("markerheight", 3);
+        if (const char* vb = marker->get_attr("viewbox")) {
+            auto nums = svgutil::parse_points(vb);  // x y w h as two pairs
+            if (nums.size() == 2) {
+                def.has_viewBox = true;
+                def.vbX = nums[0].x;
+                def.vbY = nums[0].y;
+                def.vbW = nums[1].x;
+                def.vbH = nums[1].y;
+            }
+        }
+        const char* units = marker->get_attr("markerunits");
+        def.stroke_units = !(units && std::string(units) == "userSpaceOnUse");
+
+        double angle = 0;
+        const char* orient = marker->get_attr("orient");
+        std::string o = orient ? svgutil::trim(orient) : "";
+        if (o == "auto" || o == "auto-start-reverse") {
+            angle = svgutil::segment_angle(pts, at_end);
+            if (!at_end && o == "auto-start-reverse") angle += 180;
+        } else if (!o.empty()) {
+            angle = std::strtod(o.c_str(), nullptr);
+        }
+        os << "<g transform=\"" << svgutil::marker_transform(def, at_end ? pts.back() : pts.front(), angle, stroke_width)
+           << "\">";
+        for (auto const& child : marker->children()) write_element(os, child);
+        os << "</g>";
+    };
+    place(start_ref, false);
+    place(end_ref, true);
 }
 
 std::string el_svg::reconstruct_xml(int x, int y, int width, int height) const {
@@ -422,6 +633,7 @@ std::string el_svg::reconstruct_xml(int x, int y, int width, int height) const {
         attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\n'), attr_val.end());
         attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\r'), attr_val.end());
         attr_val.erase(std::remove(attr_val.begin(), attr_val.end(), '\t'), attr_val.end());
+        if (!resolve_attr(this, attr_val, attr_val)) continue;
 
         if (attr_name == "xmlns" || attr_name == "xmlns:xlink" || attr_name == "x" ||
             attr_name == "y" || attr_name == "width" || attr_name == "height" ||
@@ -457,6 +669,45 @@ std::string el_svg::reconstruct_xml(int x, int y, int width, int height) const {
     return ss.str();
 }
 
+// Draw finished SVG XML (absolute position when tagging) at pos; shared with el_mermaid.
+void draw_svg_xml(container_skia* container, const std::string& xml, const position& pos) {
+    SkCanvas* canvas = container->get_canvas();
+    if (!canvas) return;
+    if (container->is_tagging()) {
+        int index = container->add_inline_svg(xml, pos);
+        SkPaint p;
+        p.setColor(satoru::make_magic_color(satoru::MagicTagExtended::InlineSvg, index));
+        canvas->drawRect(
+            SkRect::MakeXYWH((float)pos.x, (float)pos.y, (float)pos.width, (float)pos.height), p);
+    } else {
+        SkMemoryStream stream(xml.c_str(), xml.size());
+        auto resource_provider =
+            sk_make_sp<SatoruResourceProvider>(container->get_context().imageCache);
+        auto proxy_rp = skresources::DataURIResourceProviderProxy::Make(
+            resource_provider, skresources::ImageDecodeStrategy::kPreDecode);
+
+        SkSVGDOM::Builder builder;
+        builder.setResourceProvider(proxy_rp);
+        builder.setTextShapingFactory(
+            sk_make_sp<SatoruSvgShaperFactory>(container->get_context().getUnicodeService().getSkUnicodeSp()));
+        // Without a font manager SkSVGText draws nothing at all.
+        builder.setFontManager(sk_make_sp<SatoruSvgFontMgr>(
+            container->get_context(), container->get_context().fontManager.getFontMgr()));
+        auto svg_dom = builder.make(stream);
+
+        if (svg_dom) {
+            canvas->save();
+            canvas->translate((float)pos.x, (float)pos.y);
+
+            SkSize container_size = SkSize::Make((float)pos.width, (float)pos.height);
+            svg_dom->setContainerSize(container_size);
+            svg_dom->render(canvas);
+
+            canvas->restore();
+        }
+    }
+}
+
 void el_svg::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
                   const std::shared_ptr<render_item>& ri) {
     container_skia* container = dynamic_cast<container_skia*>(get_document()->container());
@@ -481,37 +732,7 @@ void el_svg::draw(uint_ptr hdc, pixel_t x, pixel_t y, const position* clip,
     litehtml::web_color color = css().get_color();
     xml = replace_current_color(xml, color);
 
-    if (container->is_tagging()) {
-        int index = container->add_inline_svg(xml, pos);
-        SkPaint p;
-        p.setColor(satoru::make_magic_color(satoru::MagicTagExtended::InlineSvg, index));
-        canvas->drawRect(
-            SkRect::MakeXYWH((float)pos.x, (float)pos.y, (float)pos.width, (float)pos.height), p);
-    } else {
-        SkMemoryStream stream(xml.c_str(), xml.size());
-        auto resource_provider =
-            sk_make_sp<SatoruResourceProvider>(container->get_context().imageCache);
-        auto proxy_rp = skresources::DataURIResourceProviderProxy::Make(
-            resource_provider, skresources::ImageDecodeStrategy::kPreDecode);
-
-        SkSVGDOM::Builder builder;
-        builder.setResourceProvider(proxy_rp);
-        // Without a font manager SkSVGText draws nothing at all.
-        builder.setFontManager(sk_make_sp<SatoruSvgFontMgr>(
-            container->get_context(), container->get_context().fontManager.getFontMgr()));
-        auto svg_dom = builder.make(stream);
-
-        if (svg_dom) {
-            canvas->save();
-            canvas->translate((float)pos.x, (float)pos.y);
-
-            SkSize container_size = SkSize::Make((float)pos.width, (float)pos.height);
-            svg_dom->setContainerSize(container_size);
-            svg_dom->render(canvas);
-
-            canvas->restore();
-        }
-    }
+    draw_svg_xml(container, xml, pos);
 }
 
 }  // namespace litehtml

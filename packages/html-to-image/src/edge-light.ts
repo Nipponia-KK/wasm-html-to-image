@@ -91,3 +91,7 @@ export async function render(
 ): Promise<RenderResult<Uint8Array | string>> {
   return htmlToImage(await getDefaultModule(wasm), options);
 }
+
+export type { MermaidOptions, MermaidTheme, RenderFn } from "./mermaid.js";
+// Mermaid: `renderMermaidWith((options) => render(options, wasm), source, { format: "png" })`
+export { MERMAID_THEMES, mermaidToHtml, renderMermaidWith } from "./mermaid.js";

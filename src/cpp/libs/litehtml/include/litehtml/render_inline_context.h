@@ -63,6 +63,14 @@ namespace litehtml
 		pixel_t new_box(const std::unique_ptr<line_box_item>& el, line_context& line_ctx, const containing_block_context &self_size, formatting_context* fmt_ctx);
 		void apply_vertical_align() override;
 	public:
+		// Entry for the enclosing block context: a float it placed after this
+		// run was laid out narrows the run's last line exactly as a float met
+		// inside the run does (fix_line_width).
+		void fix_last_line_width(element_float flt, const containing_block_context &self_size, formatting_context* fmt_ctx)
+		{
+			fix_line_width(flt, self_size, fmt_ctx);
+		}
+
 		explicit render_item_inline_context(std::shared_ptr<element>  src_el) : render_item_block(std::move(src_el)), m_max_line_width(0), m_is_clamped(false), m_wrap_end(0), m_wrap_eligible(true)
 		{}
 

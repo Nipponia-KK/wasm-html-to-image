@@ -8,6 +8,12 @@
 
 litehtml::pixel_t litehtml::render_item_block::place_float(const std::shared_ptr<render_item> &el, pixel_t block_offset, const containing_block_context &self_size, formatting_context* fmt_ctx)
 {
+	// In measure mode the float is not placed, so its position is stale; registering it would
+	// pollute a shared formatting context with a phantom float (see skip_ledger below). In a
+	// place pass, drop any entry this float left in the ledger on an earlier pass first.
+	const bool skip_ledger_top = (self_size.size_mode & containing_block_context::size_mode_measure) &&
+					   self_size.mode == writing_mode_horizontal_tb;
+	if (!skip_ledger_top) fmt_ctx->remove_float(el, this);
     pixel_t line_block_start = fmt_ctx->get_cleared_top(el, block_offset);
     pixel_t line_inline_start = 0;
     pixel_t line_inline_end   = self_size.render_inline_size();
@@ -50,8 +56,7 @@ litehtml::pixel_t litehtml::render_item_block::place_float(const std::shared_ptr
 	// (e.g. a leading float:right pushes the first text line down). Skip the ledger
 	// updates in measure mode for horizontal writing and report the float's own width.
 	// Vertical writing keeps the legacy behavior (float cases 30/77 depend on it).
-	bool skip_ledger = (self_size.size_mode & containing_block_context::size_mode_measure) &&
-					   self_size.mode == writing_mode_horizontal_tb;
+	const bool skip_ledger = skip_ledger_top;
 
 	// A width:auto float that shrank to fit its content is laid out at that width. Every later
 	// placement must hand it the same inline size: passing the container's width instead makes it
@@ -83,16 +88,18 @@ litehtml::pixel_t litehtml::render_item_block::place_float(const std::shared_ptr
         }
 		if(skip_ledger)
 		{
-			ret_inline_size = min_rendered_inline_size;
 			// A float that does not fit beside the earlier ones sits below them, so the box that
 			// contains the floats has to reach that bottom, not just this float's own height.
-			const pixel_t measured_top = fmt_ctx->place_measured_float(line_block_start, el->inline_size(),
+			// The returned size is the extent of the float's line: floats sharing a line sum
+			// into the container's intrinsic width, as find_min_left/right report in the place pass.
+			const pixel_t measured_top = fmt_ctx->place_measured_float(el.get(), this, line_block_start, el->inline_size(),
 																	 el->height(), float_left,
-																	 self_size.render_inline_size());
+																	 self_size.render_inline_size(),
+																	 &ret_inline_size);
 			fmt_ctx->note_measured_float_bottom(measured_top + el->height());
 		} else
 		{
-			fmt_ctx->add_float(el, min_rendered_inline_size, self_size.context_idx);
+			fmt_ctx->add_float(el, min_rendered_inline_size, self_size.context_idx, this);
 			fix_line_width(float_left, self_size, fmt_ctx);
 
 			ret_inline_size = fmt_ctx->find_min_left(line_block_start, self_size.context_idx);
@@ -115,14 +122,15 @@ litehtml::pixel_t litehtml::render_item_block::place_float(const std::shared_ptr
         }
 		if(skip_ledger)
 		{
-			ret_inline_size = min_rendered_inline_size;
-			const pixel_t measured_top = fmt_ctx->place_measured_float(line_block_start, el->inline_size(),
+			// The returned size is the extent of the float's line, as in the place pass.
+			const pixel_t measured_top = fmt_ctx->place_measured_float(el.get(), this, line_block_start, el->inline_size(),
 																	 el->height(), float_right,
-																	 self_size.render_inline_size());
+																	 self_size.render_inline_size(),
+																	 &ret_inline_size);
 			fmt_ctx->note_measured_float_bottom(measured_top + el->height());
 		} else
 		{
-			fmt_ctx->add_float(el, min_rendered_inline_size, self_size.context_idx);
+			fmt_ctx->add_float(el, min_rendered_inline_size, self_size.context_idx, this);
 			fix_line_width(float_right, self_size, fmt_ctx);
 			line_inline_end = fmt_ctx->find_min_right(line_block_start, self_size.render_inline_size(), self_size.context_idx);
 			ret_inline_size = self_size.render_inline_size() - line_inline_end;

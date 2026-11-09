@@ -1112,8 +1112,24 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             // minmax(min, max)
             const auto& min_len = len.get_operands()[0];
             const auto& max_len = len.get_operands()[1];
-            
+
             m_grid_layout.column_widths[i] = min_len.calc_percent(render_inline);
+            // Intrinsic sizing of a definite minmax(min, max) track (both bounds
+            // fixed lengths): there is no free space to distribute, so the track
+            // contributes its minimum to a min-content size and its maximum to a
+            // max-content size. The maximize step below is for definite
+            // containers only and must not run in this mode.
+            const bool intrinsic_mode =
+                (self_size.size_mode & (containing_block_context::size_mode_content |
+                                        containing_block_context::size_mode_min_content)) != 0 &&
+                render_inline.type == containing_block_context::cbc_value_type_auto;
+            if (intrinsic_mode && !min_len.is_predefined() && !max_len.is_predefined() &&
+                max_len.units() != css_units_fr)
+            {
+                if ((self_size.size_mode & containing_block_context::size_mode_min_content) == 0)
+                    m_grid_layout.column_widths[i] =
+                        std::max(m_grid_layout.column_widths[i], max_len.calc_percent(render_inline));
+            }
             fixed_width += m_grid_layout.column_widths[i];
 
             if (max_len.units() == css_units_fr)
@@ -1200,6 +1216,142 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
     // Sized under a min-content constraint, the flex fraction is zero (Blink DetermineFreeSpace): an fr
     // track is as wide as its items' min-content contributions, not scaled up to the largest one.
     const bool min_content_constraint = (self_size.size_mode & containing_block_context::size_mode_min_content) != 0;
+    // Measure an item's inline contribution. A percentage height resolves against the
+    // item's grid area, whose height while the tracks are sized is the item's own
+    // content height (the row is first sized with the percentage as auto): measure
+    // once that way, then again with the resulting border-box height definite, so a
+    // height-dependent item (a wrapping column flex) forms its lines at the resolved
+    // height instead of stacking everything into one line.
+    // The definite height of the rows an item spans, when every spanned row is a
+    // fixed length (template or grid-auto-rows pattern); -1 otherwise.
+    auto definite_row_height = [&](const grid_item& item) -> pixel_t
+    {
+        const auto& auto_rows = css().get_grid_auto_rows();
+        pixel_t total = 0;
+        for (int r = item.pos.row_start; r < item.pos.row_end; r++)
+        {
+            css_length len;
+            if (r < (int)rows_template.size()) len = rows_template[r];
+            else if (!auto_rows.empty()) len = auto_rows[(r - (int)rows_template.size()) % (int)auto_rows.size()];
+            else return -1;
+            if (len.is_predefined() || len.is_calc() || len.units() == css_units_percentage || len.units() == css_units_fr) return -1;
+            total += len.calc_percent(0);
+            if (r > item.pos.row_start) total += m_grid_layout.row_gap;
+        }
+        return total;
+    };
+    auto measure_contribution = [&](const grid_item& item, const containing_block_context& cb) -> pixel_t
+    {
+        const auto& el = item.el;
+        pixel_t measured = el->measure(cb, fmt_ctx);
+        const css_length& ih = el->src_el()->css().get_height();
+        const bool pct_h = ih.units() == css_units_percentage || (ih.is_calc() && ih.calc_percent() != 0);
+        if (pct_h && (cb.height.type == containing_block_context::cbc_value_type_auto || cb.height_cyclic))
+        {
+            pixel_t basis = el->height() - el->get_margins().height();
+            // The percentage resolves against the grid AREA, whose height is the
+            // row's height -- and the row is at least its definite track minimum
+            // (a fixed length, or a minmax() floor) and at least the content
+            // height of the other items placed in it, none of which depends on
+            // this item's inline contribution. A flex item with height:100%
+            // holding a ratio image contributes through that height: in a
+            // minmax(30px,auto) row with a 60px row-mate it contributes the
+            // image at 56 high, not at its intrinsic 10 (all fuzz seed 43).
+            if (!vert)
+            {
+                const auto& auto_rows = css().get_grid_auto_rows();
+                pixel_t row_total = 0;
+                for (int r = item.pos.row_start; r < item.pos.row_end; r++)
+                {
+                    pixel_t row_h = 0;
+                    css_length len;
+                    bool have_len = false;
+                    if (r < (int)rows_template.size()) { len = rows_template[r]; have_len = true; }
+                    else if (!auto_rows.empty()) { len = auto_rows[(r - (int)rows_template.size()) % (int)auto_rows.size()]; have_len = true; }
+                    if (have_len)
+                    {
+                        if (!len.is_predefined() && !len.is_calc() && len.units() != css_units_percentage && len.units() != css_units_fr)
+                            row_h = std::max(row_h, len.calc_percent(0));
+                        else if (len.is_calc() && len.get_op() == css_length::op_minmax && len.get_operands().size() == 2)
+                        {
+                            const css_length& mn = len.get_operands()[0];
+                            if (!mn.is_predefined() && mn.units() != css_units_percentage)
+                                row_h = std::max(row_h, mn.calc_percent(0));
+                        }
+                    }
+                    for (const auto& mate : m_grid_layout.items)
+                    {
+                        if (mate.el == el) continue;
+                        if (mate.pos.row_start > r || mate.pos.row_end <= r) continue;
+                        const auto mpos = mate.el->src_el()->css().get_position();
+                        if (mpos == element_position_absolute || mpos == element_position_fixed) continue;
+                        containing_block_context mcb = self_size;
+                        mcb.size_mode &= ~(containing_block_context::size_mode_exact_width | containing_block_context::size_mode_exact_height);
+                        mcb.size_mode |= containing_block_context::size_mode_content;
+                        mcb.size_mode |= containing_block_context::size_mode_cyclic_height;
+                        mcb.height = containing_block_context::typed_pixel(0, containing_block_context::cbc_value_type_auto);
+                        mcb.render_height = mcb.height;
+                        mcb.height_cyclic = true;
+                        mate.el->measure(mcb, fmt_ctx);
+                        row_h = std::max(row_h, mate.el->height() - mate.el->get_margins().height());
+                    }
+                    row_total += row_h;
+                    if (r > item.pos.row_start) row_total += m_grid_layout.row_gap;
+                }
+                basis = std::max(basis, row_total);
+            }
+            if (basis > 0)
+            {
+                containing_block_context cb2 = cb;
+                cb2.render_height = containing_block_context::typed_pixel(basis, containing_block_context::cbc_value_type_absolute);
+                cb2.height = cb2.render_height;
+                cb2.height_cyclic = false;
+                cb2.size_mode &= ~containing_block_context::size_mode_cyclic_height;
+                measured = el->measure(cb2, fmt_ctx);
+            }
+        }
+        // A replaced item stretched into a definite-height row takes its inline
+        // size from that height through its ratio, but this measure leaves its
+        // height indefinite: a percentage width is cyclic and reports the
+        // intrinsic width, and a fit-content width reports 0 at min-content. An
+        // 80x90 image with width:10% in a fit-content(80px) track of a 40px row
+        // contributes 80*40/90 = 35.6, not 80 (all fuzz seed 42); a fit-content
+        // svg in a min-content track contributes its transferred width likewise.
+        // Re-measure with the row height definite, mirroring the
+        // percentage-height pass above.
+        const css_length& ih2 = el->src_el()->css().get_height();
+        if (!vert && el->src_el()->is_replaced() &&
+            ih2.is_predefined() && ih2.predef() == 0)
+        {
+            flex_align_items aln = el->src_el()->css().get_align_self();
+            if (aln == flex_align_items_auto) aln = css().get_flex_align_items();
+            // Placement's rule (place_grid_items): a replaced item under a normal
+            // alignment is NOT stretched -- its height comes from its width through
+            // the ratio -- so only an explicit stretch makes the row height the
+            // item's block size. (Aligning by the looser rule broke replaced-mode
+            // seeds whose images sit in definite rows under the default alignment.)
+            const bool a_stretch = (aln & 0xFF) == flex_align_items_stretch;
+            const pixel_t row_h = a_stretch ? definite_row_height(item) : -1;
+            if (row_h > 0)
+            {
+                containing_block_context cb2 = cb;
+                cb2.render_height = containing_block_context::typed_pixel(row_h, containing_block_context::cbc_value_type_absolute);
+                cb2.height = cb2.render_height;
+                cb2.height_cyclic = false;
+                cb2.size_mode &= ~containing_block_context::size_mode_cyclic_height;
+                // The exact bit is what makes the height definite for the item: a
+                // replaced element keys its ratio transfer off the height TYPE, and
+                // an auto height property leaves the type auto however the value is set.
+                cb2.size_mode |= containing_block_context::size_mode_exact_height;
+                // At a definite height a replaced item's min-content inline size is
+                // its transferred size (min == max for replaced), not the cyclic 0 a
+                // percentage width reports under a min-content query.
+                cb2.size_mode &= ~containing_block_context::size_mode_min_content;
+                measured = el->measure(cb2, fmt_ctx);
+            }
+        }
+        return measured;
+    };
     if (content_inline && total_fr > 0)
     {
         for (auto& item : m_grid_layout.items)
@@ -1209,7 +1361,7 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             cb.size_mode &= ~(containing_block_context::size_mode_exact_width | containing_block_context::size_mode_exact_height);
             cb.size_mode |= containing_block_context::size_mode_content;
             if (min_content_constraint) cb.size_mode |= containing_block_context::size_mode_min_content;
-            pixel_t measured = item.el->measure(cb, fmt_ctx);
+            pixel_t measured = measure_contribution(item, cb);
             // measure() already returns the margin-box inline size; inline_size() can still be the
             // larger of the two when the box was measured earlier, so take both into account.
             pixel_t w = std::max((pixel_t)item.el->inline_size(),
@@ -1302,6 +1454,19 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             const css_length& iw = item.el->src_el()->css().get_width();
             const css_length& imw = item.el->src_el()->css().get_min_width();
             auto definite = [](const css_length& l) { return !l.is_predefined() && !l.is_calc() && l.units() != css_units_percentage; };
+            // A definite width IS the item's size: the floor is that width clamped by
+            // min/max-width. The min-width shortcut below only replaces the contribution
+            // when the width itself is automatic or cyclic (width:200px with
+            // min-width:100px floors the track at 200, not 100).
+            if (definite(iw))
+            {
+                pixel_t wv = std::max<pixel_t>(0, iw.calc_percent(render_inline) - item.el->box_sizing_width());
+                if (definite(imw)) wv = std::max(wv, std::max<pixel_t>(0, imw.calc_percent(render_inline) - item.el->box_sizing_width()));
+                const css_length& imxw = item.el->src_el()->css().get_max_width();
+                if (definite(imxw)) wv = std::min(wv, std::max<pixel_t>(0, imxw.calc_percent(render_inline) - item.el->box_sizing_width()));
+                floors[c] = std::max(floors[c], wv + item.el->content_offset_width());
+                continue;
+            }
             // An explicit min-width switches the automatic minimum off: it is the floor itself.
             if (!imw.is_predefined())
             {
@@ -1485,7 +1650,7 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                         containing_block_context mcb = self_size;
                         mcb.size_mode &= ~(containing_block_context::size_mode_exact_width | containing_block_context::size_mode_exact_height);
                         mcb.size_mode |= containing_block_context::size_mode_content | containing_block_context::size_mode_min_content;
-                        fit_floor[c] = std::max(fit_floor[c], (pixel_t)ceil_layout_unit(item.el->measure(mcb, fmt_ctx)));
+                        fit_floor[c] = std::max(fit_floor[c], (pixel_t)ceil_layout_unit(measure_contribution(item, mcb)));
                     }
                 }
                 containing_block_context cb = self_size;
@@ -1513,7 +1678,7 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                     cb.render_width = containing_block_context::typed_pixel((pixel_t)cb.render_width, containing_block_context::cbc_value_type_auto);
                     cb.width = cb.render_width;
                 }
-                pixel_t measured = item.el->measure(cb, fmt_ctx);
+                pixel_t measured = measure_contribution(item, cb);
                 // measure() returns the margin-box inline size (padding and border included), so
                 // adding the offsets again would count them twice.
                 pixel_t w = std::max((pixel_t)item.el->inline_size(),
@@ -1522,7 +1687,9 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                 // scroll container without a specified width (its automatic minimum size).
                 if (min_content_constraint && kinds[c] == 1 && !vert &&
                     item.el->src_el()->css().get_overflow() != overflow_visible &&
-                    item.el->src_el()->css().get_width().is_predefined() && item.el->src_el()->css().get_width().predef() == 0 &&
+                    ((item.el->src_el()->css().get_width().is_predefined() && item.el->src_el()->css().get_width().predef() == 0) ||
+                     item.el->src_el()->css().get_width().units() == css_units_percentage ||
+                     (item.el->src_el()->css().get_width().is_calc() && item.el->src_el()->css().get_width().calc_percent() != 0)) &&
                     item.el->src_el()->css().get_min_width().is_predefined())
                     w = item.el->content_offset_width();
                 // Under a min-content constraint an item with a definite min-width
@@ -1728,8 +1895,21 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                         int c = item.pos.col_start;
                         if (c >= num_columns || (kinds[c] != 1 && kinds[c] != 4)) continue;
                         // An explicit min-width switches the automatic minimum off: it is the floor itself.
+                        // (A definite width outranks it, as in fr_track_floors: the floor is the
+                        // width clamped by min/max-width.)
                         {
+                            const css_length& iw2 = item.el->src_el()->css().get_width();
                             const css_length& imw = item.el->src_el()->css().get_min_width();
+                            auto definite2 = [](const css_length& l) { return !l.is_predefined() && !l.is_calc() && l.units() != css_units_percentage; };
+                            if (definite2(iw2))
+                            {
+                                pixel_t wv = std::max<pixel_t>(0, iw2.calc_percent(render_inline) - item.el->box_sizing_width());
+                                if (definite2(imw)) wv = std::max(wv, std::max<pixel_t>(0, imw.calc_percent(render_inline) - item.el->box_sizing_width()));
+                                const css_length& imxw2 = item.el->src_el()->css().get_max_width();
+                                if (definite2(imxw2)) wv = std::min(wv, std::max<pixel_t>(0, imxw2.calc_percent(render_inline) - item.el->box_sizing_width()));
+                                minc[c] = std::max(minc[c], std::min(wv + item.el->content_offset_width(), m_grid_layout.column_widths[c]));
+                                continue;
+                            }
                             if (!imw.is_predefined())
                             {
                                 if (!imw.is_calc() && imw.units() != css_units_percentage)
@@ -1743,7 +1923,16 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                             // its content-based one; a definite width still floors the track.
                             // (A non-auto min-width was already handled above.)
                             const css_length& iw0 = item.el->src_el()->css().get_width();
-                            if (iw0.is_predefined() && iw0.predef() == 0) continue;
+                            if ((iw0.is_predefined() && iw0.predef() == 0) ||
+                                iw0.units() == css_units_percentage ||
+                                (iw0.is_calc() && iw0.calc_percent() != 0))
+                            {
+                                // The zero is the CONTENT size: the item's margins, padding
+                                // and borders still floor the track (a margin:2px item
+                                // keeps a 4px track, not 0).
+                                minc[c] = std::max(minc[c], std::min(item.el->content_offset_width(), m_grid_layout.column_widths[c]));
+                                continue;
+                            }
                         }
                         containing_block_context cb = self_size;
                         // The grid's own exact size describes its box, not the intrinsic size of an item.
@@ -1825,7 +2014,23 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             }
             pixel_t remaining = render_inline - fixed2;
             if (remaining < 0) remaining = 0;
-            remaining = maximize_definite_minmax(remaining);
+            if (!content_inline)
+            {
+                remaining = maximize_definite_minmax(remaining);
+            }
+            else
+            {
+                // fixed2 counted definite minmax tracks at their minimum; under
+                // a max-content query they sit at their maximum, so that part is
+                // not free space for the fr resolution below.
+                for (int i = 0; i < num_columns; i++)
+                {
+                    if (!is_definite_minmax(i)) continue;
+                    remaining -= m_grid_layout.column_widths[i] -
+                                 columns_template[i].get_operands()[0].calc_percent(render_inline);
+                }
+                if (remaining < 0) remaining = 0;
+            }
             // A shrink-to-fit grid is no wider than the space it is given: when its tracks add up to more,
             // the fr tracks share what the content tracks leave.
             bool over_available = false;
@@ -1915,6 +2120,10 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
     float total_row_fr = 0;
     pixel_t fixed_height = 0;
 
+    // The flexible factor of each row (0 for non-flexible rows): a plain fr and the
+    // maximum of a minmax() both count; they are resolved after the measure pass.
+    std::vector<pixel_t> row_fr_factor(num_rows, 0);
+
     // Calculate fixed and percentage rows
     for (int i = 0; i < (int)row_tracks.size(); i++)
     {
@@ -1922,6 +2131,7 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         if (len.units() == css_units_fr)
         {
             total_row_fr += len.val();
+            row_fr_factor[i] = len.val();
         }
         else if (len.is_calc() && len.get_op() == css_length::op_minmax && len.get_operands().size() == 2)
         {
@@ -1929,6 +2139,11 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             const auto& mn = len.get_operands()[0];
             m_grid_layout.row_heights[i] = (!mn.is_predefined() && mn.units() != css_units_fr) ? mn.calc_percent(render_block) : 0;
             fixed_height += m_grid_layout.row_heights[i];
+            if (len.get_operands()[1].units() == css_units_fr)
+            {
+                total_row_fr += len.get_operands()[1].val();
+                row_fr_factor[i] = len.get_operands()[1].val();
+            }
         }
         else
         {
@@ -1967,6 +2182,12 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         {
             const auto op = len.get_op();
             row_kinds[i] = (op == css_length::op_fit_content || op == css_length::op_minmax) ? 1 : 0;
+            // A minmax() with a flexible maximum in a definite-height container is sized
+            // by the fr resolution after the measure pass, never grown by content; with
+            // an indefinite height it keeps sizing to content like the other minmax rows.
+            if (op == css_length::op_minmax && len.get_operands().size() == 2 &&
+                len.get_operands()[1].units() == css_units_fr && definite_block)
+                row_kinds[i] = 0;
             // minmax(<min>, auto): an auto maximum is stretched like an auto track
             row_auto[i] = (op == css_length::op_minmax && len.get_operands().size() == 2 &&
                            len.get_operands()[1].is_predefined() && len.get_operands()[1].predef() == 0) ? 1 : 0;
@@ -1985,20 +2206,12 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         }
     }
 
-    // Distribute remaining space to fr rows
-    if (total_row_fr > 0 && definite_block)
-    {
-        pixel_t remaining_height = render_block - fixed_height;
-        if (remaining_height < 0) remaining_height = 0;
-        for (int i = 0; i < (int)row_tracks.size(); i++)
-        {
-            const auto& len = row_tracks[i];
-            if (len.units() == css_units_fr)
-            {
-                m_grid_layout.row_heights[i] = remaining_height * (len.val() / total_row_fr);
-            }
-        }
-    }
+    m_grid_layout.row_definite.assign(num_rows, 0);
+    for (int i = 0; i < num_rows; i++)
+        m_grid_layout.row_definite[i] = row_kinds[i] == 0;
+
+    // Flexible rows are resolved after the measure pass (below): a plain fr row's
+    // automatic minimum is its items' content floor, which is only known by then.
 
     // `align-items/self: baseline`: the items of a row that share a baseline occupy the row's largest
     // ascent plus its largest descent, which can exceed every item's own height.
@@ -2041,6 +2254,16 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             cb.height = containing_block_context::cbc_value_type_auto;
         }
         cb.size_mode |= containing_block_context::size_mode_measure;
+        // A percentage height of an item is cyclic while its row is being sized: the row is
+        // the percentage basis, not the grid container, so even with a definite container
+        // height the percentage behaves as auto for the item's height contribution and only
+        // resolves against the finished row height.
+        if (!vert && (item.el->src_el()->css().get_height().units() == css_units_percentage ||
+                      (item.el->src_el()->css().get_height().is_calc() && item.el->src_el()->css().get_height().calc_percent() != 0)))
+        {
+            cb.size_mode |= containing_block_context::size_mode_cyclic_height;
+            cb.height_cyclic = true;
+        }
         // The grid's own exact-size flags (it is itself being placed into a fixed track) must not
         // leak into sizing its items: their content height has to be measured, not forced.
         cb.size_mode &= ~(containing_block_context::size_mode_exact_width | containing_block_context::size_mode_exact_height);
@@ -2051,15 +2274,38 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         // whose tracks only open up at the wider size reports the wide height (116.8 for
         // a row that renders 16 tall once the item shrinks to 32 -- fuzz replaced 14).
         bool measured_at_used_width = false;
-        if (!vert && !item.el->src_el()->is_replaced() &&
-            item.el->src_el()->css().get_width().is_predefined())
+        if (!vert && item.el->src_el()->css().get_width().is_predefined())
         {
             flex_justify_content jst_h = item.el->src_el()->css().get_justify_self();
             if (jst_h == flex_justify_content_auto) jst_h = css().get_justify_items();
             const bool j_normal_h = jst_h == flex_justify_content_auto || jst_h == flex_justify_content_normal;
             const bool intrinsic_width_h = item.el->src_el()->css().get_width().predef() > 0;
-            const bool j_stretch_h = (j_normal_h && !intrinsic_width_h) || jst_h == flex_justify_content_stretch;
-            if (!j_stretch_h)
+            // Mirroring place_grid_items: a replaced item with a natural size is not
+            // stretched by normal alignment, and no alignment stretches a
+            // content-keyword width.
+            const bool replaced_start_h = item.el->src_el()->is_replaced() &&
+                                          !item.el->src_el()->is_ratio_only_replaced();
+            const bool j_stretch_h = ((j_normal_h && !replaced_start_h) && !intrinsic_width_h) ||
+                                     (jst_h == flex_justify_content_stretch && !intrinsic_width_h);
+            if (item.el->src_el()->is_replaced())
+            {
+                // A replaced item ignores the area width in the measure above: with an
+                // auto width it reports its natural size. When placement will stretch
+                // it to the area (or fill it, for a ratio-only box), its height
+                // contribution is the height at the area width instead -- an img with
+                // a natural 120x30 in a 60px stretched column contributed 30 to its
+                // row where the placed height is 15 (all fuzz seed 33).
+                if (j_stretch_h)
+                {
+                    containing_block_context wcb = cb;
+                    wcb.size_mode |= containing_block_context::size_mode_exact_width;
+                    wcb.render_width = cell_width;
+                    wcb.width = wcb.render_width;
+                    item.el->measure(wcb, fmt_ctx);
+                    measured_at_used_width = true;
+                }
+            }
+            else if (!j_stretch_h)
             {
                 containing_block_context mcb = cb;
                 mcb.size_mode |= containing_block_context::size_mode_content;
@@ -2098,6 +2344,7 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         if (!measured_at_used_width)
             item.el->measure(cb, fmt_ctx);
 
+
         if (!vert && item.pos.row_span() == 1)
         {
             flex_align_items aln = item.el->src_el()->css().get_align_self();
@@ -2123,6 +2370,10 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
     // The tallest content each row could use (its growth limit): rows grow towards it first when the
     // container leaves free space; what is left after that stretches the auto rows equally.
     std::vector<pixel_t> row_limit(num_rows, 0);
+    // The content floor of a flexible row (the automatic minimum of a plain fr /
+    // minmax(auto, fr) track): the tallest single-row item, scroll containers excluded
+    // exactly as in the growth rule below.
+    std::vector<pixel_t> row_fr_floor(num_rows, 0);
 
     // Distribute heights
     for (int span = 1; span <= num_rows; span++)
@@ -2151,6 +2402,8 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
             // of definite height its row is shared out from the free space, not grown to the item's content.
             const bool scroll_item = definite_block && item.pos.row_span() == 1 &&
                 item.el->src_el()->css().get_overflow() != overflow_visible && item_block_size.is_predefined();
+            if (item.pos.row_span() == 1 && item.pos.row_start < num_rows && !scroll_item)
+                row_fr_floor[item.pos.row_start] = std::max(row_fr_floor[item.pos.row_start], total_h);
             if (total_h > current_total && !scroll_item)
             {
                 // Grow only the content-sized tracks in the item's span. A fixedly sized
@@ -2170,6 +2423,59 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                 }
             }
 
+        }
+    }
+
+    // Resolve the flexible rows now that the content heights are known (CSS Grid
+    // 12.7.1, mirroring resolve_flex_tracks for columns). A flexible row's base is
+    // its minimum: the resolved minmax() minimum, or -- for a plain fr /
+    // minmax(auto, fr), whose minimum is automatic -- its items' content floor.
+    // A row whose base exceeds its share is frozen at the base and the rest is
+    // re-shared; content never grows a length-minimum flexible row past its share
+    // (minmax(0, 1fr) in a 448px container is 448 tall however tall its items are,
+    // while a plain 1fr row is floored by its content).
+    if (definite_block && total_row_fr > 0)
+    {
+        std::vector<pixel_t> base(num_rows, 0);
+        std::vector<bool> active(num_rows, false);
+        pixel_t leftover = render_block - (num_rows > 0 ? m_grid_layout.row_gap * (num_rows - 1) : 0);
+        for (int i = 0; i < num_rows; i++)
+        {
+            if (i < (int)row_fr_factor.size() && row_fr_factor[i] > 0)
+            {
+                const auto& len = row_tracks[i];
+                const bool auto_min = len.units() == css_units_fr ||
+                    (len.get_operands().size() == 2 && len.get_operands()[0].is_predefined());
+                base[i] = auto_min ? row_fr_floor[i] : m_grid_layout.row_heights[i];
+                active[i] = true;
+            }
+            else
+            {
+                leftover -= m_grid_layout.row_heights[i];
+            }
+        }
+        for (int guard = 0; guard < num_rows + 1; guard++)
+        {
+            pixel_t sum = 0;
+            for (int i = 0; i < num_rows; i++) if (active[i]) sum += row_fr_factor[i];
+            if (sum <= 0) break;
+            // (a flex factor sum below 1 is treated as 1, as in the column resolver)
+            const pixel_t fr = std::max<pixel_t>(0, leftover) / std::max<pixel_t>(sum, 1);
+            bool frozen = false;
+            for (int i = 0; i < num_rows; i++)
+            {
+                if (active[i] && base[i] > fr * row_fr_factor[i])
+                {
+                    active[i] = false;
+                    m_grid_layout.row_heights[i] = base[i];
+                    leftover -= base[i];
+                    frozen = true;
+                }
+            }
+            if (frozen) continue;
+            for (int i = 0; i < num_rows; i++)
+                if (active[i]) m_grid_layout.row_heights[i] = fr * row_fr_factor[i];
+            break;
         }
     }
 
@@ -2328,6 +2634,33 @@ void litehtml::render_item_grid::place_grid_items(pixel_t x, pixel_t y, const co
         cb.width = cb.render_width;
         cb.render_height = cell_h - item.el->content_offset_height() + item.el->box_sizing_height();
         cb.height = cb.render_height;
+        // The item's percentage basis is its grid area, not the grid container: when every
+        // spanned row is a fixed track, the area height is definite even when the
+        // container's own height is cyclic (content-derived), so the inherited cyclic flag
+        // must not make the item's percentage height behave as auto.
+        if (!vert && !m_grid_layout.row_definite.empty())
+        {
+            bool span_definite = true;
+            for (int i = item.pos.row_start; i < item.pos.row_end && i < num_rows; i++)
+                if (!m_grid_layout.row_definite[i]) { span_definite = false; break; }
+            if (span_definite && item.pos.row_end <= num_rows)
+            {
+                cb.height_cyclic = false;
+                cb.size_mode &= ~containing_block_context::size_mode_cyclic_height;
+            }
+        }
+        // A definite grid height makes every area height definite too,
+        // content-sized rows included: a wrapping column flex with
+        // height:30% in a 116px row of a flex-sized grid takes 34.8px even
+        // though its own content sized the row (grid-flex fuzz seed 23).
+        // With an indefinite grid height the percentage stays auto (the
+        // P0-78 guard: the row is then exactly the item's own content).
+        if (!vert && (self_size.height.type == containing_block_context::cbc_value_type_absolute ||
+                      self_size.render_height.type == containing_block_context::cbc_value_type_absolute))
+        {
+            cb.height_cyclic = false;
+            cb.size_mode &= ~containing_block_context::size_mode_cyclic_height;
+        }
         cb.size_mode |= containing_block_context::size_mode_exact_height;
         cb.size_mode |= containing_block_context::size_mode_exact_width;
         if (!vert)
@@ -2381,7 +2714,13 @@ void litehtml::render_item_grid::place_grid_items(pixel_t x, pixel_t y, const co
         // keyword the width still comes from the content measure -- the ratio transfer from a
         // definite block size -- not from the area)
         const bool intrinsic_width = item.el->src_el()->css().get_width().is_predefined() && item.el->src_el()->css().get_width().predef() > 0;
-        const bool j_stretch = ((j_normal && !replaced_start_x) && !intrinsic_width) || jst == flex_justify_content_stretch;
+        // An explicit stretch does not override a content-keyword width either: stretch
+        // sizing applies to an auto inline size only, so a fit-content / max-content /
+        // min-content item keeps its keyword size under justify-items:stretch (an
+        // intrinsic-width img measured the full track width and transferred a huge
+        // height through its ratio -- all fuzz seed 33).
+        const bool j_stretch = ((j_normal && !replaced_start_x) && !intrinsic_width) ||
+                               (jst == flex_justify_content_stretch && !intrinsic_width);
         const bool intrinsic_height = item.el->src_el()->css().get_height().is_predefined() && item.el->src_el()->css().get_height().predef() > 0;
         const bool a_stretch = !intrinsic_height && ((a_normal && !replaced_item) || (aln & 0xFF) == flex_align_items_stretch);
         // A replaced item with an aspect ratio does not stretch in both axes: when its block

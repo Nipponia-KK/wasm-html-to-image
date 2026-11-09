@@ -1,0 +1,335 @@
+#include "mermaid/classdiagram.h"
+
+#include <algorithm>
+#include <cmath>
+#include <map>
+
+#include "mermaid/layered.h"
+#include "mermaid/nodestyle.h"
+
+namespace mermaid {
+namespace {
+
+using litehtml::svgutil::trim;
+
+enum Mark { kNoMark = 0, kTriangle, kDiamondFilled, kDiamondHollow, kArrow };
+
+struct Class {
+    std::string name, annotation;
+    std::vector<std::string> attrs, methods;
+    double w = 0, h = 0, head_h = 0, attrs_h = 0;
+};
+
+struct Relation {
+    int a, b;  // as written
+    Mark ma, mb;
+    bool dashed;
+    std::string label, card_a, card_b;
+};
+
+struct Doc {
+    std::vector<Class> classes;
+    std::vector<Relation> rels;
+    std::map<std::string, int> index;
+    Direction dir = Direction::TD;
+    StyleSheet sheet;
+};
+
+bool starts(const std::string& s, const char* p) { return s.compare(0, std::char_traits<char>::length(p), p) == 0; }
+
+std::string clean_name(std::string n) {
+    n = trim(n);
+    size_t p = n.find(":::");
+    if (p != std::string::npos) n = trim(n.substr(0, p));
+    p = n.find('~');  // generics: Box~T~
+    if (p != std::string::npos) n = trim(n.substr(0, p));
+    if (n.size() >= 2 && n.front() == '`' && n.back() == '`') n = n.substr(1, n.size() - 2);
+    return n;
+}
+
+int class_for(Doc& d, const std::string& raw) {
+    std::string name = clean_name(raw);
+    size_t cls_at = raw.find(":::");
+    if (cls_at != std::string::npos) d.sheet.use(name, trim(raw.substr(cls_at + 3)));
+    auto it = d.index.find(name);
+    if (it != d.index.end()) return it->second;
+    Class c;
+    c.name = name;
+    d.classes.push_back(c);
+    return d.index[name] = (int)d.classes.size() - 1;
+}
+
+void add_member(Class& c, const std::string& raw) {
+    std::string m = trim(raw);
+    if (m.empty()) return;
+    if (starts(m, "<<") && m.size() > 4 && m.compare(m.size() - 2, 2, ">>") == 0) {
+        c.annotation = m;
+        return;
+    }
+    (m.find('(') != std::string::npos ? c.methods : c.attrs).push_back(m);
+}
+
+struct Op {
+    const char* tok;
+    Mark ma, mb;
+    bool dashed;
+};
+const Op kOps[] = {{"<|--", kTriangle, kNoMark, false}, {"--|>", kNoMark, kTriangle, false}, {"<|..", kTriangle, kNoMark, true},
+                   {"..|>", kNoMark, kTriangle, true},  {"*--", kDiamondFilled, kNoMark, false}, {"--*", kNoMark, kDiamondFilled, false},
+                   {"o--", kDiamondHollow, kNoMark, false}, {"--o", kNoMark, kDiamondHollow, false}, {"<--", kArrow, kNoMark, false},
+                   {"-->", kNoMark, kArrow, false},     {"<..", kArrow, kNoMark, true},         {"..>", kNoMark, kArrow, true},
+                   {"--", kNoMark, kNoMark, false},     {"..", kNoMark, kNoMark, true}};
+
+bool parse_relation(Doc& d, const std::string& line, bool& matched, std::string& error) {
+    size_t best = std::string::npos;
+    const Op* op = nullptr;
+    for (auto& o : kOps) {
+        size_t n = std::char_traits<char>::length(o.tok);
+        for (size_t p = line.find(o.tok); p != std::string::npos; p = line.find(o.tok, p + 1)) {
+            bool before = p > 0 && (line[p - 1] == ' ' || line[p - 1] == '"');
+            bool after = p + n < line.size() && (line[p + n] == ' ' || line[p + n] == '"');
+            if (!before || !after) continue;
+            if (best == std::string::npos || p < best || (p == best && n > std::char_traits<char>::length(op->tok))) {
+                best = p;
+                op = &o;
+            }
+            break;
+        }
+    }
+    matched = op != nullptr;
+    if (!op) return true;
+    std::string left = trim(line.substr(0, best)), right = trim(line.substr(best + std::char_traits<char>::length(op->tok))), label;
+    Relation r;
+    r.ma = op->ma;
+    r.mb = op->mb;
+    r.dashed = op->dashed;
+    if (!left.empty() && left.back() == '"') {
+        size_t q = left.rfind('"', left.size() - 2);
+        if (q != std::string::npos) {
+            r.card_a = left.substr(q + 1, left.size() - q - 2);
+            left = trim(left.substr(0, q));
+        }
+    }
+    if (!right.empty() && right[0] == '"') {
+        size_t q = right.find('"', 1);
+        if (q != std::string::npos) {
+            r.card_b = right.substr(1, q - 1);
+            right = trim(right.substr(q + 1));
+        }
+    }
+    size_t colon = right.find(':');
+    if (colon != std::string::npos) {
+        label = trim(right.substr(colon + 1));
+        right = trim(right.substr(0, colon));
+    }
+    if (left.empty() || right.empty()) {
+        error = "a relation needs two classes: " + line;
+        return false;
+    }
+    r.a = class_for(d, left);
+    r.b = class_for(d, right);
+    r.label = label;
+    d.rels.push_back(r);
+    return true;
+}
+
+bool parse(const std::string& source, Doc& d, std::string& error) {
+    bool first = true;
+    int open = -1;
+    size_t i = 0;
+    while (i <= source.size()) {
+        size_t e = source.find('\n', i);
+        std::string line = trim(source.substr(i, e == std::string::npos ? std::string::npos : e - i));
+        i = e == std::string::npos ? source.size() + 1 : e + 1;
+        if (!line.empty() && line.back() == ';') line = trim(line.substr(0, line.size() - 1));
+        if (line.empty() || starts(line, "%%")) continue;
+        if (first) {
+            first = false;
+            continue;
+        }
+        if (open >= 0) {
+            if (line == "}") open = -1;
+            else add_member(d.classes[open], line);
+            continue;
+        }
+        if (starts(line, "direction ")) {
+            std::string v = trim(line.substr(10));
+            d.dir = v == "LR" ? Direction::LR : v == "RL" ? Direction::RL : v == "BT" ? Direction::BT : Direction::TD;
+            continue;
+        }
+        if (d.sheet.take(line, false)) continue;
+        if (starts(line, "note") || starts(line, "style ") || starts(line, "classDef ") || starts(line, "cssClass ") || starts(line, "click ") ||
+            starts(line, "link ") || starts(line, "callback ") || starts(line, "namespace ") || starts(line, "title ") || line == "}")
+            continue;
+        if (starts(line, "class ")) {
+            std::string rest = trim(line.substr(6));
+            bool brace = !rest.empty() && rest.back() == '{';
+            if (brace) rest = trim(rest.substr(0, rest.size() - 1));
+            size_t sp = rest.find(' ');
+            int c = class_for(d, sp == std::string::npos ? rest : rest.substr(0, sp));
+            if (brace) open = c;
+            continue;
+        }
+        if (starts(line, "<<")) {  // `<<interface>> Name`
+            size_t close = line.find(">>");
+            if (close != std::string::npos) {
+                int c = class_for(d, line.substr(close + 2));
+                d.classes[c].annotation = line.substr(0, close + 2);
+                continue;
+            }
+        }
+        bool matched = false;
+        if (!parse_relation(d, line, matched, error)) return false;
+        if (matched) continue;
+        size_t colon = line.find(':');  // `Name : member`
+        if (colon != std::string::npos) {
+            add_member(d.classes[class_for(d, line.substr(0, colon))], line.substr(colon + 1));
+            continue;
+        }
+        error = "unrecognised line: " + line;
+        return false;
+    }
+    if (open >= 0) {
+        error = "unclosed class block";
+        return false;
+    }
+    return true;
+}
+
+constexpr double kRow = 18, kHead = 28, kAnnot = 16, kSection = 8, kTextPad = 12;
+
+struct Dir2 {
+    double x, y;
+};
+
+Dir2 unit(Pt from, Pt to) {
+    double dx = to.x - from.x, dy = to.y - from.y, len = std::sqrt(dx * dx + dy * dy);
+    return len < 0.001 ? Dir2{0, 1} : Dir2{dx / len, dy / len};
+}
+
+double mark_length(Mark m) { return m == kTriangle ? 12 : (m == kDiamondFilled || m == kDiamondHollow) ? 16 : m == kArrow ? 0 : 0; }
+
+void draw_mark(std::string& out, Mark m, Pt tip, Dir2 d, const Theme& th) {
+    // d points from the line toward the tip (into the class)
+    double nx = -d.y, ny = d.x;
+    auto P = [&](double along, double side) { return Pt{tip.x - d.x * along + nx * side, tip.y - d.y * along + ny * side}; };
+    auto pt = [&](Pt p) { return num(p.x) + "," + num(p.y); };
+    if (m == kTriangle) {
+        out += "<polygon points=\"" + pt(tip) + " " + pt(P(12, 6)) + " " + pt(P(12, -6)) + "\" fill=\"" + th.bg + "\" stroke=\"" + th.line + "\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n";
+    } else if (m == kDiamondFilled || m == kDiamondHollow) {
+        out += "<polygon points=\"" + pt(tip) + " " + pt(P(8, 5)) + " " + pt(P(16, 0)) + " " + pt(P(8, -5)) + "\" fill=\"" +
+               (m == kDiamondFilled ? th.line : th.bg) + "\" stroke=\"" + th.line + "\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n";
+    } else if (m == kArrow) {
+        out += "<polyline points=\"" + pt(P(9, 5)) + " " + pt(tip) + " " + pt(P(9, -5)) + "\" fill=\"none\" stroke=\"" + th.line + "\" stroke-width=\"1.5\" stroke-linejoin=\"round\"/>\n";
+    }
+}
+
+}  // namespace
+
+bool render_class(const std::string& source, const Options& options, std::string& svg, std::string& error) {
+    using namespace metrics;
+    Doc d;
+    if (!parse(source, d, error)) return false;
+    if (d.classes.empty()) {
+        error = "empty diagram";
+        return false;
+    }
+    Theme th = make_theme(options);
+    Text text{options};
+
+    std::vector<LayoutNode> ln(d.classes.size());
+    for (size_t k = 0; k < d.classes.size(); k++) {
+        Class& c = d.classes[k];
+        double w = text.width(c.name, kNodeFont, 600);
+        if (!c.annotation.empty()) w = std::max(w, text.width(c.annotation, kEdgeFont, 400));
+        for (auto& m : c.attrs) w = std::max(w, text.width(m, kEdgeFont + 1, 400));
+        for (auto& m : c.methods) w = std::max(w, text.width(m, kEdgeFont + 1, 400));
+        c.w = std::max(80.0, w + 2 * kTextPad);
+        c.head_h = kHead + (c.annotation.empty() ? 0 : kAnnot);
+        c.attrs_h = c.attrs.empty() ? kSection : c.attrs.size() * kRow + kSection;
+        c.h = c.head_h + c.attrs_h + (c.methods.empty() ? kSection : c.methods.size() * kRow + kSection);
+        ln[k].w = c.w;
+        ln[k].h = c.h;
+    }
+    // the marked end of a relation is the parent: it goes first so it is laid out above (or left of) the other
+    std::vector<LayoutEdge> le(d.rels.size());
+    std::vector<bool> flipped(d.rels.size(), false);
+    std::vector<std::vector<std::string>> label_lines(d.rels.size());
+    for (size_t k = 0; k < d.rels.size(); k++) {
+        const Relation& r = d.rels[k];
+        flipped[k] = r.ma == kNoMark && r.mb != kNoMark;
+        le[k].from = flipped[k] ? r.b : r.a;
+        le[k].to = flipped[k] ? r.a : r.b;
+        if (!r.label.empty()) {
+            label_lines[k] = split_lines(r.label);
+            le[k].label_w = text.block_width(label_lines[k], kEdgeFont, kEdgeWeight) + 16;
+            le[k].label_h = label_lines[k].size() * kEdgeFont * kLineHeight + 16;
+        }
+    }
+    LayoutResult lay = layout_layered(ln, le, d.dir);
+    const double ox = kMargin, oy = kMargin;
+    auto at = [&](Pt p) { return Pt{p.x + ox, p.y + oy}; };
+
+    std::string body;
+    for (size_t k = 0; k < d.rels.size(); k++) {
+        const Relation& r = d.rels[k];
+        if (lay.points[k].size() < 2) continue;
+        std::vector<Pt> pts;
+        for (const Pt& p : lay.points[k]) pts.push_back(at(p));
+        Mark m_from = flipped[k] ? r.mb : r.ma, m_to = flipped[k] ? r.ma : r.mb;
+        const std::string& card_from = flipped[k] ? r.card_b : r.card_a;
+        const std::string& card_to = flipped[k] ? r.card_a : r.card_b;
+        Pt tip_from = pts.front(), tip_to = pts.back();
+        Dir2 d_from = unit(pts[1], pts[0]), d_to = unit(pts[pts.size() - 2], pts.back());
+        pts.front() = {tip_from.x - d_from.x * mark_length(m_from), tip_from.y - d_from.y * mark_length(m_from)};
+        pts.back() = {tip_to.x - d_to.x * mark_length(m_to), tip_to.y - d_to.y * mark_length(m_to)};
+        std::string list;
+        for (const Pt& p : pts) list += (list.empty() ? "" : " ") + num(p.x) + "," + num(p.y);
+        body += "<polyline class=\"edge\" points=\"" + list + "\" fill=\"none\" stroke=\"" + th.line + "\" stroke-width=\"1.5\"" +
+                (r.dashed ? " stroke-dasharray=\"5 4\"" : "") + " stroke-linejoin=\"round\"/>\n";
+        draw_mark(body, m_from, tip_from, d_from, th);
+        draw_mark(body, m_to, tip_to, d_to, th);
+        auto card = [&](const std::string& s, Pt tip, Dir2 dd, Mark mk) {
+            double along = mark_length(mk) + 12;
+            if (s.empty()) return;
+            double nx = -dd.y, ny = dd.x;
+            body += "<text x=\"" + num(tip.x - dd.x * along + nx * 11) + "\" y=\"" + num(tip.y - dd.y * along + ny * 11 + 4) + "\" text-anchor=\"middle\" font-size=\"" +
+                    num(kEdgeFont) + "\" font-family=\"" + esc(th.font) + "\" fill=\"" + th.text_sec + "\">" + esc(s) + "</text>\n";
+        };
+        card(card_from, tip_from, d_from, m_from);
+        card(card_to, tip_to, d_to, m_to);
+    }
+    for (size_t k = 0; k < d.rels.size(); k++) {
+        if (label_lines[k].empty()) continue;
+        Pt c = at(lay.label_center[k]);
+        body += "<g class=\"edge-label\">\n<rect x=\"" + num(c.x - le[k].label_w / 2) + "\" y=\"" + num(c.y - le[k].label_h / 2) + "\" width=\"" + num(le[k].label_w) + "\" height=\"" +
+                num(le[k].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.bg + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\"/>\n";
+        centered_text(body, th, label_lines[k], c.x, c.y, kEdgeFont, kEdgeWeight, th.text_sec);
+        body += "</g>\n";
+    }
+    for (size_t k = 0; k < d.classes.size(); k++) {
+        const Class& c = d.classes[k];
+        Pt p = at(lay.center[k]);
+        double x = p.x - c.w / 2, y = p.y - c.h / 2;
+        body += "<g class=\"node\">\n<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(c.w) + "\" height=\"" + num(c.h) + "\"" + d.sheet.paint(c.name, th.surface, th.border) + "/>\n";
+        body += "<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(c.w) + "\" height=\"" + num(c.head_h) + "\" fill=\"" + th.group_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        double ty = y + c.head_h / 2;
+        if (!c.annotation.empty()) {
+            centered_text(body, th, {c.annotation}, p.x, y + 4 + kAnnot / 2 + 2, kEdgeFont, 400, th.text_sec);
+            ty = y + kAnnot + kHead / 2;
+        }
+        centered_text(body, th, {c.name}, p.x, ty, kNodeFont, 600, th.text);
+        double ay = y + c.head_h;
+        for (size_t m = 0; m < c.attrs.size(); m++)
+            aligned_text(body, th, {c.attrs[m]}, x + kTextPad, ay + kSection / 2 + m * kRow + kRow / 2, kEdgeFont + 1, 400, th.text, "start");
+        double my = ay + c.attrs_h;
+        body += "<line x1=\"" + num(x) + "\" y1=\"" + num(my) + "\" x2=\"" + num(x + c.w) + "\" y2=\"" + num(my) + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        for (size_t m = 0; m < c.methods.size(); m++)
+            aligned_text(body, th, {c.methods[m]}, x + kTextPad, my + kSection / 2 + m * kRow + kRow / 2, kEdgeFont + 1, 400, th.text, "start");
+        body += "</g>\n";
+    }
+    svg = svg_document(th, lay.width + 2 * kMargin, lay.height + 2 * kMargin, body);
+    return true;
+}
+
+}  // namespace mermaid

@@ -119,6 +119,35 @@ target_sources(html_to_image_core PRIVATE
     src/cpp/core/text/text_geometry.cpp
     src/cpp/core/litehtml_extensions.cpp
     src/cpp/core/el_svg.cpp
+    src/cpp/core/el_mermaid.cpp
+    src/cpp/mermaid/mermaid.cpp
+    src/cpp/mermaid/flowchart.cpp
+    src/cpp/mermaid/layered.cpp
+    src/cpp/mermaid/sequence.cpp
+    src/cpp/mermaid/state.cpp
+    src/cpp/mermaid/classdiagram.cpp
+    src/cpp/mermaid/erdiagram.cpp
+    src/cpp/mermaid/xychart.cpp
+    src/cpp/mermaid/pie.cpp
+    src/cpp/mermaid/gantt.cpp
+    src/cpp/mermaid/mindmap.cpp
+    src/cpp/mermaid/timeline.cpp
+    src/cpp/mermaid/treeview.cpp
+    src/cpp/mermaid/ishikawa.cpp
+    src/cpp/mermaid/venn.cpp
+    src/cpp/mermaid/c4.cpp
+    src/cpp/mermaid/architecture.cpp
+    src/cpp/mermaid/info.cpp
+    src/cpp/mermaid/radar.cpp
+    src/cpp/mermaid/treemap.cpp
+    src/cpp/mermaid/block.cpp
+    src/cpp/mermaid/requirement.cpp
+    src/cpp/mermaid/sankey.cpp
+    src/cpp/mermaid/packet.cpp
+    src/cpp/mermaid/kanban.cpp
+    src/cpp/mermaid/gitgraph.cpp
+    src/cpp/mermaid/quadrant.cpp
+    src/cpp/mermaid/journey.cpp
     src/cpp/core/resource_manager.cpp
     src/cpp/core/font_manager.cpp
     src/cpp/renderers/svg_renderer.cpp

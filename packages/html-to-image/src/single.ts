@@ -7,6 +7,7 @@
  * (`Uint8Array` / `ArrayBuffer` / `data:image/` URL); image input skips
  * rendering and goes straight to `converter_encode`.
  */
+import { bindRenderMermaid, type RenderMermaid } from "./mermaid.js";
 import { loadHtmlToImageModule, type HtmlToImageModule } from "./loader.js";
 import {
   htmlToImage,
@@ -57,3 +58,8 @@ export async function render(
 ): Promise<RenderResult<Uint8Array | string>> {
   return htmlToImage(await getDefaultModule(), await applyJavaScript(options));
 }
+
+export type { MermaidOptions, MermaidTheme, RenderMermaid } from "./mermaid.js";
+export { MERMAID_THEMES, mermaidToHtml, renderMermaidWith } from "./mermaid.js";
+/** Render a Mermaid diagram as SVG text (default) or an image, sized to the diagram. */
+export const renderMermaid: RenderMermaid = bindRenderMermaid((options) => render(options));

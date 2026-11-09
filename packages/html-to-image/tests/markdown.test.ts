@@ -37,6 +37,15 @@ describe("markdownToHtml", () => {
     expect(plain).toMatch(/\.markdown-body \{ padding: 40px;/);
   });
 
+  it("turns mermaid fences into diagram blocks unless switched off", () => {
+    const md = "```mermaid\ngraph TD\n  A --> B & C\n```\n";
+    const html = markdownToHtml(md);
+    expect(html).toContain('<div class="mermaid">graph TD\n  A --&gt; B &amp; C</div>');
+    expect(html).not.toContain("<pre><code");
+    expect(markdownToHtml(md, { mermaid: false })).toContain('<pre><code class="language-mermaid">');
+    expect(markdownToHtml(md, { highlight: false })).toContain('class="mermaid"');
+  });
+
   it("highlights fenced code with a known language and leaves the rest escaped", () => {
     const html = markdownToHtml(
       '```ts\nconst s: string = "a<b"; // c\n```\n\n```nope\n<b>x</b>\n```\n\n```\nplain\n```',

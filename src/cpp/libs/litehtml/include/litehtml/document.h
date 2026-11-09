@@ -120,7 +120,7 @@ namespace litehtml
 		bool							on_button_cancel(position::vector& redraw_boxes);
 		bool							on_mouse_leave(position::vector& redraw_boxes);
 		std::shared_ptr<element>		create_element(const char* tag_name, const string_map& attributes);
-		std::shared_ptr<element>		create_element(const char* tag_name, int gumbo_tag = -1);
+		std::shared_ptr<element>		create_element(const char* tag_name, int gumbo_tag = -1, const string_map* attributes = nullptr);
 		std::shared_ptr<element>		root() const;
 		std::shared_ptr<render_item>	root_render();
 		// box-decoration-break: clone support for fragmented output (PDF pages). The band is the

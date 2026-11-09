@@ -295,7 +295,15 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 			}
 			if (tag[0])
 			{
-				ret = create_element(tag, node->v.element.tag);
+				// A container that picks an element class by the markup (the engine draws <pre class="mermaid"> itself)
+				// needs the class before the element exists; pass it for the two tags that can carry a diagram.
+				string_map early_attrs;
+				if (!strcmp(tag, "pre") || !strcmp(tag, "div"))
+				{
+					if (GumboAttribute* cls = gumbo_get_attribute(&node->v.element.attributes, "class"))
+						early_attrs["class"] = cls->value;
+				}
+				ret = create_element(tag, node->v.element.tag, early_attrs.empty() ? nullptr : &early_attrs);
 			}
 			else
 			{
@@ -432,6 +440,7 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 					float widest = 0;
 					float row_ratio = 1.15f; // (ascent + descent) / font size of the measure font
 					std::vector<string> rows;
+					std::vector<char> row_selected;
 					uint_ptr measure_font = 0;
 					float measure_size = 16;
 					if (m_container)
@@ -454,7 +463,7 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 							row_ratio = (float)(rfm.ascent + rfm.descent) / 13.333f;
 						}
 					}
-					auto add_row = [&](const string& t) {
+					auto add_row = [&](const string& t, bool selected = false) {
 						float w = 0;
 						if (measure_font && measure_size > 0)
 						{
@@ -471,6 +480,7 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 						}
 						widest = std::max(widest, w);
 						rows.push_back(t);
+						row_selected.push_back(selected ? 1 : 0);
 					};
 					std::function<void(GumboNode*)> scan = [&](GumboNode* n) {
 						for (unsigned int i = 0; i < n->v.element.children.length; i++)
@@ -501,7 +511,7 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 								clean += t[k];
 							}
 							t = clean;
-							add_row(t);
+							add_row(t, gumbo_get_attribute(&c->v.element.attributes, "selected") != nullptr);
 							if (first_label.empty()) first_label = t;
 							if (!have_selected && gumbo_get_attribute(&c->v.element.attributes, "selected"))
 							{
@@ -546,13 +556,20 @@ void document::create_node(void* gnode, elements_list& elements, bool parseTextN
 					{
 						if (!rows.empty())
 						{
-							string all;
+							// One block row per option/label: a selected row carries the
+							// selection background across the full content width, the
+							// way browsers paint it (the reference theme's selection
+							// color, #CECECE). Rows inherit the select's pinned
+							// line-height, so the geometry is the pre-text model's.
 							for (size_t k = 0; k < rows.size(); k++)
 							{
-								if (k) all += '\n';
-								all += rows[k];
+								auto row = create_element("div", -1);
+								string rs = "display:block;white-space:pre;";
+								if (k < row_selected.size() && row_selected[k]) rs += "background-color:rgb(206,206,206);";
+								row->set_attr("style", rs.c_str());
+								row->appendChild(std::make_shared<el_text>(rows[k].empty() ? " " : rows[k].c_str(), shared_from_this()));
+								ret->appendChild(row);
 							}
-							ret->appendChild(std::make_shared<el_text>(all.c_str(), shared_from_this()));
 						}
 						if (!style_has(st, "white-space")) extra += "white-space:pre;";
 						if (!style_has(st, "padding")) extra += "padding:0 2px;";
@@ -721,14 +738,14 @@ element::ptr document::create_element(const char* tag_name, const string_map& at
 	return el;
 }
 
-element::ptr document::create_element(const char* tag_name, int gumbo_tag)
+element::ptr document::create_element(const char* tag_name, int gumbo_tag, const string_map* attributes)
 {
 	element::ptr newTag;
 	document::ptr this_doc = shared_from_this();
 	if (m_container)
 	{
 		string_map empty_attrs;
-		newTag = m_container->create_element(tag_name, empty_attrs, this_doc);
+		newTag = m_container->create_element(tag_name, attributes ? *attributes : empty_attrs, this_doc);
 	}
 	if (!newTag)
 	{
@@ -1119,6 +1136,17 @@ pixel_t document::to_pixels( const css_length& val, const font_metrics& metrics,
 		break;
 	case css_units_ch:
 		ret = (pixel_t) (metrics.ch_width * val.val());
+		break;
+	case css_units_lh:
+		// The element's own computed line-height, carried in its font metrics;
+		// 'normal' (the font's natural height) when it was never set.
+		ret = (pixel_t) ((metrics.line_height > 0 ? metrics.line_height : metrics.height) * val.val());
+		break;
+	case css_units_rlh:
+		if (m_root && m_root->css().line_height().computed_value > 0)
+			ret = (pixel_t) (m_root->css().line_height().computed_value * val.val());
+		else
+			ret = (pixel_t) (metrics.height * val.val());
 		break;
 	default:
 		ret = (pixel_t) val.val();

@@ -12,10 +12,14 @@ import {
 } from "./markdownSettings";
 import reportSample from "./samples/report.md?raw";
 import bookSample from "./samples/book.md?raw";
+import proposalSample from "./samples/proposal.md?raw";
+import diagramsSample from "./samples/diagrams.md?raw";
 import technicalSample from "./samples/technical.md?raw";
 
 const SAMPLES = [
   { id: "report", label: "Report (Japanese)", text: reportSample },
+  { id: "proposal", label: "Proposal with diagrams (Japanese)", text: proposalSample },
+  { id: "diagrams", label: "Mermaid diagrams", text: diagramsSample },
   { id: "book", label: "Book (Japanese)", text: bookSample },
   { id: "technical", label: "Maths and code", text: technicalSample },
 ] as const;

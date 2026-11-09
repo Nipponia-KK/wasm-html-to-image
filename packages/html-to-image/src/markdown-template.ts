@@ -196,6 +196,23 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
 .cover { margin: 60mm 0 0; padding-left: 14px; border-left: 6px solid var(--accent, #1d4ed8); }`,
   },
 
+  proposal: {
+    description: "Proposal / quotation: cover, accent bars on sections, tinted table headers and call-out quotes",
+    type: { size: 14, lineHeight: 1.7, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 4 },
+    page: {
+      margin: "24mm 20mm 22mm",
+      header: `<div style="${RUNNING}text-align:right;padding-top:8mm">{{stamp}}</div>`,
+      footer: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-bottom:8mm"><span>{{title}}</span><span>{{pageNumber}} / {{totalPages}}</span></div>`,
+    },
+    defaults: { cover: true, toc: false, accent: "#0f766e" },
+    css: `.markdown-body h1 { margin-top: 36px; padding: 2px 0 2px 12px; border-left: 6px solid var(--accent, #0f766e); font-size: 1.7em; }
+.markdown-body h2 { margin-top: 28px; font-size: 1.25em; }
+.markdown-body th { color: #ffffff; background: var(--accent, #0f766e); }
+.markdown-body tr:nth-child(2n) { background: #f1f5f9; }
+.markdown-body blockquote { padding: 10px 16px; border-left: 4px solid var(--accent, #0f766e); background: #f1f5f9; }
+.cover { margin: 70mm 0 0; padding: 0 0 0 14px; border-left: 8px solid var(--accent, #0f766e); }`,
+  },
+
   book: {
     description: "Book: serif text, justified, every chapter (h1) on a new page, inner-margin friendly page",
     type: { font: "serif", size: 15, lineHeight: 1.8, justify: true, h1Rule: false, h2Rule: false, headingWeight: 700, chapterBreak: true, radius: 3 },

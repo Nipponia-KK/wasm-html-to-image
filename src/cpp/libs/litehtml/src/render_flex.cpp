@@ -175,7 +175,13 @@ litehtml::pixel_t litehtml::render_item_flex::_render_content(pixel_t x, pixel_t
 							cb.size_mode = containing_block_context::size_mode_exact_height |
 										   containing_block_context::size_mode_measure |
 										   containing_block_context::size_mode_content;
-							if(self_size.render_block_size().type == containing_block_context::cbc_value_type_auto)
+							// The pinned block size is the item's content-derived main size: it stays
+							// indefinite for percentage resolution inside the item whenever the item's
+							// own block size is content-derived (a predefined height) or the container's
+							// block size is itself indefinite / cyclic.
+							if(self_size.render_block_size().type == containing_block_context::cbc_value_type_auto ||
+								self_size.height_cyclic ||
+								fi->el->css().get_height().is_predefined())
 							{
 								cb.size_mode |= containing_block_context::size_mode_cyclic_height;
 							}

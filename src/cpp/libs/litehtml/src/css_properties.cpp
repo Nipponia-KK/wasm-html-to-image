@@ -606,6 +606,35 @@ void litehtml::css_properties::compute(const element* el, const document::ptr& d
         }
     }
 
+    // The line height is computed before the box lengths below: the lh unit
+    // (and through the root, rlh) resolves against it, so it is also stored
+    // into the font metrics every later cvt_units for this element reads.
+    m_line_height.css_value =
+        el->get_property<css_length>(_line_height_, true, normal, offset(m_line_height.css_value));
+    if (m_line_height.css_value.is_predefined()) {
+        m_line_height.computed_value = (pixel_t)(m_font_metrics.height);
+    } else if (m_line_height.css_value.units() == css_units_lh) {
+        // lh in the line-height property itself refers to the PARENT's line
+        // height (the element's own is what is being defined).
+        pixel_t base = el->parent() ? el->parent()->css().line_height().computed_value : 0;
+        if (base <= 0) base = m_font_metrics.height;
+        m_line_height.computed_value = (pixel_t)(m_line_height.css_value.val() * base);
+        m_line_height.css_value = (float)m_line_height.computed_value;
+    } else if (m_line_height.css_value.is_calc()) {
+        // A calc() length carries css_units_none, so without this branch it
+        // fell into the unitless-number case below and computed to 0.
+        m_line_height.computed_value =
+            doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size);
+        m_line_height.css_value = (float)m_line_height.computed_value;
+    } else if (m_line_height.css_value.units() == css_units_none) {
+        m_line_height.computed_value = (pixel_t)(m_line_height.css_value.val() * font_size);
+    } else {
+        m_line_height.computed_value =
+            doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size);
+        m_line_height.css_value = (float)m_line_height.computed_value;
+    }
+    m_font_metrics.line_height = m_line_height.computed_value;
+
     doc->cvt_units(m_css_width, m_font_metrics, 0);
     doc->cvt_units(m_css_height, m_font_metrics, 0);
 
@@ -971,23 +1000,6 @@ void litehtml::css_properties::compute(const element* el, const document::ptr& d
         el->get_property<css_length>(_text_indent_, true, 0, offset(m_css_text_indent));
     doc->cvt_units(m_css_text_indent, m_font_metrics, 0);
 
-    m_line_height.css_value =
-        el->get_property<css_length>(_line_height_, true, normal, offset(m_line_height.css_value));
-    if (m_line_height.css_value.is_predefined()) {
-        m_line_height.computed_value = (pixel_t)(m_font_metrics.height);
-    } else if (m_line_height.css_value.is_calc()) {
-        // A calc() length carries css_units_none, so without this branch it
-        // fell into the unitless-number case below and computed to 0.
-        m_line_height.computed_value =
-            doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size);
-        m_line_height.css_value = (float)m_line_height.computed_value;
-    } else if (m_line_height.css_value.units() == css_units_none) {
-        m_line_height.computed_value = (pixel_t)(m_line_height.css_value.val() * font_size);
-    } else {
-        m_line_height.computed_value =
-            doc->to_pixels(m_line_height.css_value, m_font_metrics, m_font_metrics.font_size);
-        m_line_height.css_value = (float)m_line_height.computed_value;
-    }
 
     m_list_style_type = (list_style_type)el->get_property<int>(
         _list_style_type_, true, list_style_type_disc, offset(m_list_style_type));

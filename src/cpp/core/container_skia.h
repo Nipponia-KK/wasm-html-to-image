@@ -244,6 +244,11 @@ class container_skia : public litehtml::document_container {
     }
 
     const std::set<char32_t> &get_used_codepoints() const { return m_text.usedCodepoints; }
+    /// Characters drawn outside the text pipeline (inline SVG <text>): the font slices that cover them
+    /// have to be fetched like the ones for HTML text.
+    void add_used_codepoints(const std::set<char32_t> &codepoints) {
+        if (m_resourceManager) m_text.usedCodepoints.insert(codepoints.begin(), codepoints.end());
+    }
     const std::set<font_request> &get_requested_font_attributes() const {
         return m_text.requestedAttrs;
     }

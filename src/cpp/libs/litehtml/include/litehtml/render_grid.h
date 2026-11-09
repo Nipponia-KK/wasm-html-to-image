@@ -30,6 +30,7 @@ namespace litehtml
 			vector<pixel_t> col_offsets;
 			vector<pixel_t> row_heights;
 			vector<pixel_t> row_offsets;
+			vector<char> row_definite;	// per row: height does not depend on content (fixed track)
 			vector<grid_item> items;
 			pixel_t total_grid_width = 0;
 			pixel_t total_grid_height = 0;
@@ -44,6 +45,7 @@ namespace litehtml
 				col_offsets.clear();
 				row_heights.clear();
 				row_offsets.clear();
+				row_definite.clear();
 				items.clear();
 				total_grid_width = 0;
 				total_grid_height = 0;

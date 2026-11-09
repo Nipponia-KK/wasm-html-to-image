@@ -250,7 +250,7 @@ void append_break_units(litehtml::element* el, std::vector<BreakUnit>& units) {
     }
     BreakUnit u;
     u.top = (int)(p.y - above);
-    u.bottom = (int)(p.y + p.height + below);
+    u.bottom = (int)std::ceil(p.y + p.height + below);  // rounded up: a cut at the bottom edge must not leave a pixel of the box behind
     u.before = el->css().get_break_before();
     u.after = el->css().get_break_after();
     u.inside = el->css().get_break_inside();

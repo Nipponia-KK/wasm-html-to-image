@@ -739,6 +739,30 @@ void litehtml::render_item::render_positioned(render_type rt) {
                 need_render = true;
             }
 
+            // The shrink-to-fit width (10.3.7): min(max(preferred minimum,
+            // available), preferred), where the insets are the definite offsets
+            // the width must leave room for. Taking the preferred width alone
+            // overflows a containing block narrower than the content (an abspos
+            // box inside a 6px-wide abspos parent came out at its full 300px
+            // preferred width -- all fuzz seed 43).
+            auto shrink_to_fit = [&](pixel_t insets) -> pixel_t
+            {
+                position pos = el->m_pos;
+                pixel_t pref = el->measure(
+                    containing_block_size.new_width(containing_block_size.width,
+                                                    containing_block_context::size_mode_content),
+                    nullptr);
+                el->m_pos = pos;
+                pixel_t pref_min = el->measure(
+                    containing_block_size.new_width(containing_block_size.width,
+                                                    containing_block_context::size_mode_content |
+                                                    containing_block_context::size_mode_min_content),
+                    nullptr);
+                el->m_pos = pos;
+                pixel_t avail = containing_block_size.width - insets;
+                return std::min(std::max(pref_min, avail), pref);
+            };
+
             // Calculate horizontal position
             pixel_t right = 0;
             pixel_t left = 0;
@@ -751,13 +775,8 @@ void litehtml::render_item::render_positioned(render_type rt) {
                 // shrink-to-fit. Then solve for 'left'
                 if (el->css().get_margins().left.is_predefined()) el->m_margins.left = 0;
                 if (el->css().get_margins().right.is_predefined()) el->m_margins.right = 0;
-                position pos = el->m_pos;
-                width = el->measure(
-                    containing_block_size.new_width(containing_block_size.width,
-                                                    containing_block_context::size_mode_content),
-                    nullptr);
-                el->m_pos = pos;
                 right = css_right.calc_percent(containing_block_size.width);
+                width = shrink_to_fit(right);
                 left = containing_block_size.width - width - right;
             } else if (css_left.is_predefined() && css_right.is_predefined() &&
                        !el_width.is_predefined()) {
@@ -776,13 +795,8 @@ void litehtml::render_item::render_positioned(render_type rt) {
                 // shrink-to-fit . Then solve for 'right'
                 if (el->css().get_margins().left.is_predefined()) el->m_margins.left = 0;
                 if (el->css().get_margins().right.is_predefined()) el->m_margins.right = 0;
-                position pos = el->m_pos;
-                width = el->measure(
-                    containing_block_size.new_width(containing_block_size.width,
-                                                    containing_block_context::size_mode_content),
-                    nullptr);
-                el->m_pos = pos;
                 left = css_left.calc_percent(containing_block_size.width);
+                width = shrink_to_fit(left);
             } else if (css_left.is_predefined() && !css_right.is_predefined() &&
                        !el_width.is_predefined()) {
                 // 4. 'left' is 'auto', 'width' and 'right' are not 'auto', then solve for 'left'
@@ -851,13 +865,8 @@ void litehtml::render_item::render_positioned(render_type rt) {
                 // otherwise, set 'right' to the static position and apply rule number one below.
                 if (el->css().get_margins().left.is_predefined()) el->m_margins.left = 0;
                 if (el->css().get_margins().right.is_predefined()) el->m_margins.right = 0;
-                position pos = el->m_pos;
-                width = el->measure(
-                    containing_block_size.new_width(containing_block_size.width,
-                                                    containing_block_context::size_mode_content),
-                    nullptr);
-                el->m_pos = pos;
                 left = el_static_x - el->content_offset_left();
+                width = shrink_to_fit(left);
             } else {
                 // If none of the three is 'auto':
                 width = fix_width_min_max(el->get_predefined_width(containing_block_size.width));
@@ -895,8 +904,18 @@ void litehtml::render_item::render_positioned(render_type rt) {
             }
             el->m_pos.x = left + el->content_offset_left() + cb_origin_x;
             // (a zero-width box matches by accident when nothing was laid out inside it: measure it)
+            // A percentage width needs the render too: the box may already carry the solved
+            // width from the static-position place in its parent's block layout, but its
+            // children were laid out there against the measured (shrink) width, not against
+            // the solved one -- the equal own width must not suppress the re-render.
+            // A box with children needs the render too when its subtree was laid out by an
+            // earlier provisional pass (a measure for a flex/grid parent's intrinsic size, or
+            // a shrink-to-fit trial): the box's own solved size can already match while the
+            // children still carry the trial geometry (a percentage-width child resolved
+            // against the trial width, an auto-width child shrink-wrapped instead of filling).
             if (el->m_pos.width != width - el->content_offset_width() || el->m_pos.width == 0 ||
-                el_width.is_predefined()) {
+                el_width.is_predefined() || el_width.units() == css_units_percentage ||
+                !el->children().empty()) {
                 el->m_pos.width = width - el->content_offset_width();
                 need_render = true;
             }

@@ -21,8 +21,20 @@ namespace litehtml
 			pixel_t bottom = 0;
 			pixel_t left = 0;
 			pixel_t right = 0;
+			element_float side = float_left;
+			// Identity of the float, so a repeated measure of the same float replaces its record
+			// instead of stacking a second copy beside the first.
+			const render_item* key = nullptr;
+			// The block whose measure pass placed the float, and the placement order within the
+			// pass: re-placing a float invalidates the records placed after it in the same pass,
+			// because a repeated measure re-runs the children in order and those records belong
+			// to the previous run.
+			const render_item* scope = nullptr;
+			unsigned int seq = 0;
 		};
 		std::vector<measured_float> m_measure_floats;
+		unsigned int m_measure_seq = 0;
+		unsigned int m_float_seq = 0;
 		pixel_pixel_cache m_cache_line_left;
 		pixel_pixel_cache m_cache_line_right;
 		pixel_t m_current_block_pos;
@@ -60,9 +72,15 @@ namespace litehtml
             }
 		}
 
-		void add_float(const std::shared_ptr<render_item> &el, pixel_t min_width, int context);
+		void add_float(const std::shared_ptr<render_item> &el, pixel_t min_width, int context,
+					   const render_item* scope = nullptr);
+		// Drops a float's ledger entries: a float that is laid out again (a shrink-to-fit parent
+		// lays its children out at a trial width before the final one) must not avoid its own
+		// stale entry from the earlier pass.
+		void remove_float(const std::shared_ptr<render_item> &el, const render_item* scope = nullptr);
 		void clear_floats(int context);
 		pixel_t find_next_line_top( pixel_t top, pixel_t width, pixel_t def_right );
+		pixel_t find_next_line_top_measured(const render_item* scope, pixel_t top, pixel_t width, pixel_t block_size, pixel_t container_inline_size);
 		pixel_t get_floats_height(element_float el_float = float_none) const;
 		// Measure passes do not register floats; this keeps how far down they reach so that a box which
 		// contains its floats (a flow root) still grows to them.
@@ -71,8 +89,12 @@ namespace litehtml
 		// Where a float measured in a measure pass would sit: as high as it fits beside the floats
 		// measured before it, which is below them when the container is too narrow for both on one
 		// line (as in the place pass, Blink's float placement). Records the float's extent.
-		pixel_t place_measured_float(pixel_t top, pixel_t inline_size, pixel_t block_size,
-									 element_float side, pixel_t container_inline_size);
+		// out_extent, when given, receives the inline extent the float's line reaches from its
+		// side (the accumulated width of the floats sharing the line), for intrinsic sizing.
+		pixel_t place_measured_float(const render_item* key, const render_item* scope, pixel_t top,
+									 pixel_t inline_size, pixel_t block_size, element_float side,
+									 pixel_t container_inline_size,
+									 pixel_t* out_extent = nullptr);
 		pixel_t get_left_floats_height() const;
 		pixel_t get_right_floats_height() const;
 		pixel_t get_line_left( pixel_t y );

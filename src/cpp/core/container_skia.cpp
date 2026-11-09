@@ -765,6 +765,16 @@ litehtml::element::ptr container_skia::create_element(
     if (tag == "svg") {
         return std::make_shared<litehtml::el_svg>(doc);
     }
+    if (tag == "pre" || tag == "div") {
+        // <pre class="mermaid"> / <div class="mermaid">: a diagram that the engine draws itself
+        auto cls = attributes.find("class");
+        if (cls != attributes.end()) {
+            std::string v = " " + cls->second + " ";
+            for (char& ch : v)
+                if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
+            if (v.find(" mermaid ") != std::string::npos) return std::make_shared<litehtml::el_mermaid>(doc);
+        }
+    }
     return nullptr;
 }
 

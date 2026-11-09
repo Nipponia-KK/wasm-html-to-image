@@ -1,12 +1,15 @@
 #include "mermaid/flowchart.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <map>
 
+#include "mermaid/frame_clear.h"
 #include "mermaid/layered.h"
+#include "mermaid/swimlane.h"
 
 namespace mermaid {
 
@@ -25,8 +28,11 @@ struct Node {
     Shape shape = Shape::Rect;
     Style style;
     int group = -1;
+    bool phantom = false;  // stands in for an empty subgraph: sized to its frame, drawn as nothing
+    bool parked = false;   // an empty subgraph: kept out of the layout and set beside the drawing or beside its parent's frame, its edges drawn straight
     double w = 0, h = 0;
     std::vector<std::string> lines;
+    std::string href, tooltip, target;  // from `click`: the node is drawn inside a link
 };
 
 enum class Kind { Solid, Dotted, Thick, Invisible };
@@ -55,6 +61,7 @@ struct Graph {
     std::vector<std::pair<int, std::string>> class_use;  // node, class name
     std::map<int, Style> link_styles;                    // edge index, -1 = default
     std::map<int, std::string> link_stroke;
+    bool swimlane = false;  // `swimlane-beta`: the top-level subgraphs are lanes
 };
 
 bool is_id_char(unsigned char c) { return std::isalnum(c) || c == '_' || c >= 0x80; }
@@ -199,22 +206,31 @@ struct Parser {
 
     // The connector after a node: `-->`, `---`, `-.->`, `==>`, `--x`, `<-->`, `-- text -->`, `-->|text|` ...
     bool parse_link(const std::string& s, size_t& i, Link& link) {
+        size_t before = i;
         while (i < s.size() && s[i] == ' ') i++;
         size_t j = i;
         if (j >= s.size()) return false;
         if (s[j] == '<') {
             link.arrow_start = true;
             j++;
+        } else if ((s[j] == 'o' || s[j] == 'x') && j > before && j + 1 < s.size() && (s[j + 1] == '-' || s[j + 1] == '=')) {
+            // `A o--o B` / `A x--x B`: a circle or cross at the start (after a space, so it is not part of a name)
+            link.arrow_start = true;
+            j++;
+        }
+        if (!link.arrow_start && j > before) {
+            // an edge id: `A e1@--> B`
+            size_t p = j;
+            while (p < s.size() && is_id_char((unsigned char)s[p])) p++;
+            if (p > j && p + 1 < s.size() && s[p] == '@' && (s[p + 1] == '-' || s[p + 1] == '=' || s[p + 1] == '~')) j = p + 1;
         }
         char c = j < s.size() ? s[j] : 0;
         if (c != '-' && c != '=' && c != '~') return false;
         auto arrow = [&](size_t& k) {
             if (k < s.size() && (s[k] == '>' || s[k] == 'x' || s[k] == 'o')) {
-                bool real = s[k] == '>' || k + 1 >= s.size() || !is_id_char((unsigned char)s[k + 1]);
-                if (real) {
-                    link.arrow_end = true;
-                    k++;
-                }
+                // as in Mermaid, `--xB` and `--oB` are a cross / circle end followed by the node B
+                link.arrow_end = true;
+                k++;
             }
         };
         if (c == '~') {
@@ -226,10 +242,12 @@ struct Parser {
         } else if (c == '-' && j + 1 < s.size() && s[j + 1] == '.') {
             // dotted: -.-  -.->  -. text .->
             size_t k = j + 2;
-            if (k < s.size() && s[k] == ' ') {
+            if (k < s.size() && s[k] != '.' && s[k] != '-') {  // `-. text .->`, `-.text.->`
                 size_t e = s.find(".-", k);
                 if (e == std::string::npos) return false;
-                link.label = trim(s.substr(k, e - k));
+                std::string text = trim(s.substr(k, e - k));
+                if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
+                link.label = text;
                 k = e;
             }
             while (k < s.size() && s[k] == '.') k++;
@@ -242,19 +260,30 @@ struct Parser {
             size_t k = j;
             while (k < s.size() && s[k] == c) k++;
             size_t run = k - j;
-            if (run >= 2 && k < s.size() && s[k] == ' ') {
-                // `-- text -->`: text up to the closing run of the same character
+            size_t after_run = k;
+            arrow(k);
+            if (run >= 3 || (run == 2 && link.arrow_end)) {
+                // `---`, `----`, `===`, `-->`, `--->`, `==>`: an open link or an arrow; a label comes as `|text|`
+            } else if (run == 2 && after_run < s.size()) {
+                // `-- text -->`, `--text-->`, `--"text"-->`: text up to the closing run of the same character
+                k = after_run;
                 size_t e = k;
-                std::string closer(2, c);
-                size_t f = s.find(closer, e);
+                while (e < s.size() && s[e] == ' ') e++;
+                size_t search = e;
+                if (e < s.size() && s[e] == '"') {  // a quoted label may hold the closing characters
+                    size_t q = s.find('"', e + 1);
+                    if (q != std::string::npos) search = q + 1;
+                }
+                size_t f = s.find(std::string(2, c), search);
                 if (f == std::string::npos) return false;
-                link.label = trim(s.substr(k, f - k));
+                std::string text = trim(s.substr(k, f - k));
+                if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
+                link.label = text;
                 k = f;
                 while (k < s.size() && s[k] == c) k++;
                 arrow(k);
             } else {
-                arrow(k);
-                if (run < 2 || (run == 2 && !link.arrow_end)) return false;
+                return false;
             }
             link.kind = c == '=' ? Kind::Thick : Kind::Solid;
             i = k;
@@ -263,7 +292,13 @@ struct Parser {
             size_t p = i;
             while (p < s.size() && s[p] == ' ') p++;
             if (p < s.size() && s[p] == '|') {
-                size_t q = s.find('|', p + 1);
+                size_t from = p + 1;
+                while (from < s.size() && s[from] == ' ') from++;
+                if (from < s.size() && s[from] == '"') {  // a quoted label may hold `|`
+                    size_t cq = s.find('"', from + 1);
+                    if (cq != std::string::npos) from = cq + 1;
+                }
+                size_t q = s.find('|', from);
                 if (q != std::string::npos) {
                     std::string text = trim(s.substr(p + 1, q - p - 1));
                     if (text.size() >= 2 && text.front() == '"' && text.back() == '"') text = text.substr(1, text.size() - 2);
@@ -320,6 +355,40 @@ struct Parser {
         return i >= s.size();
     }
 
+    /// `click ID "url" ["tooltip"] [target]` or `click ID href "url" ...`; `call` / callback forms need script and are skipped.
+    void take_click(const std::string& rest) {
+        std::vector<std::pair<std::string, bool>> tok;  // text, was quoted
+        for (size_t i = 0; i < rest.size();) {
+            if (rest[i] == ' ' || rest[i] == '\t') {
+                i++;
+            } else if (rest[i] == '"') {
+                size_t e = rest.find('"', i + 1);
+                if (e == std::string::npos) e = rest.size();
+                tok.push_back({rest.substr(i + 1, e - i - 1), true});
+                i = e + 1;
+            } else {
+                size_t e = rest.find_first_of(" \t", i);
+                if (e == std::string::npos) e = rest.size();
+                tok.push_back({rest.substr(i, e - i), false});
+                i = e;
+            }
+        }
+        if (tok.size() < 2) return;
+        auto it = g.index.find(tok[0].first);
+        if (it == g.index.end()) return;
+        size_t k = 1;
+        if (!tok[k].second && tok[k].first == "href") k++;
+        if (k >= tok.size() || !tok[k].second) return;
+        std::string url = tok[k++].first, low;
+        for (char ch : url) low += (char)std::tolower((unsigned char)ch);
+        if (url.empty() || low.compare(0, 11, "javascript:") == 0 || low.compare(0, 5, "data:") == 0 || low.compare(0, 9, "vbscript:") == 0) return;
+        Node& n = g.nodes[it->second];
+        n.href = url;
+        if (k < tok.size() && tok[k].second) n.tooltip = tok[k++].first;
+        if (k < tok.size() && !tok[k].second && (tok[k].first == "_blank" || tok[k].first == "_self" || tok[k].first == "_parent" || tok[k].first == "_top"))
+            n.target = tok[k].first;
+    }
+
     bool parse_statement(const std::string& line) {
         std::string s = trim(line);
         if (s.empty()) return true;
@@ -349,7 +418,11 @@ struct Parser {
             if (!group_stack.empty()) group_stack.pop_back();
             return true;
         }
-        if (starts("direction") || starts("click") || starts("accTitle") || starts("accDescr") || starts("title")) return true;
+        if (starts("click")) {
+            take_click(s.substr(5));
+            return true;
+        }
+        if (starts("direction") || starts("accTitle") || starts("accDescr") || starts("title")) return true;
         if (starts("classDef")) {
             std::string rest = trim(s.substr(8));
             size_t sp = rest.find(' ');
@@ -417,14 +490,201 @@ struct Parser {
     }
 };
 
+/// `A@{ shape: diamond, label: "x" }` (Mermaid's node-metadata form) as the node written in bracket syntax. Metadata that names no
+/// shape or label (`e1@{ animate: true }`, an edge's) is dropped.
+std::string expand_node_meta(const std::string& line) {
+    std::string out = line;
+    for (size_t at = out.find("@{"); at != std::string::npos; at = out.find("@{")) {
+        size_t id_begin = at;
+        while (id_begin > 0 && is_id_char((unsigned char)out[id_begin - 1])) id_begin--;
+        size_t close = out.size();
+        bool quote = false;
+        for (size_t k = at + 2; k < out.size(); k++) {
+            if (out[k] == '"') quote = !quote;
+            else if (out[k] == '}' && !quote) {
+                close = k;
+                break;
+            }
+        }
+        std::string id = out.substr(id_begin, at - id_begin), body = out.substr(at + 2, close - at - 2);
+        auto value = [&](const char* key) {
+            size_t p = body.find(std::string(key) + ":");
+            if (p == std::string::npos) return std::string();
+            p += std::strlen(key) + 1;
+            while (p < body.size() && body[p] == ' ') p++;
+            size_t e = p;
+            if (p < body.size() && body[p] == '"') {
+                e = body.find('"', p + 1);
+                return e == std::string::npos ? body.substr(p + 1) : body.substr(p + 1, e - p - 1);
+            }
+            e = body.find(',', p);
+            return trim(body.substr(p, e == std::string::npos ? std::string::npos : e - p));
+        };
+        std::string shape = value("shape"), label = value("label");
+        std::string node;
+        if (!id.empty() && (!shape.empty() || !label.empty())) {
+            if (label.empty()) label = id;
+            label = "\"" + label + "\"";
+            if (shape == "rounded" || shape == "event" || shape == "round") node = id + "(" + label + ")";
+            else if (shape == "stadium" || shape == "terminal" || shape == "pill") node = id + "([" + label + "])";
+            else if (shape == "fr-rect" || shape == "subroutine" || shape == "subproc" || shape == "framed-rectangle") node = id + "[[" + label + "]]";
+            else if (shape == "cyl" || shape == "cylinder" || shape == "database" || shape == "db") node = id + "[(" + label + ")]";
+            else if (shape == "circle" || shape == "circ") node = id + "((" + label + "))";
+            else if (shape == "diam" || shape == "diamond" || shape == "decision" || shape == "question") node = id + "{" + label + "}";
+            else if (shape == "hex" || shape == "hexagon" || shape == "prepare") node = id + "{{" + label + "}}";
+            else if (shape == "lean-r" || shape == "lean-right" || shape == "in-out") node = id + "[/" + label + "/]";
+            else if (shape == "lean-l" || shape == "lean-left" || shape == "out-in") node = id + "[\\" + label + "\\]";
+            else if (shape == "trap-b" || shape == "trapezoid-bottom" || shape == "priority") node = id + "[/" + label + "\\]";
+            else if (shape == "trap-t" || shape == "trapezoid-top" || shape == "manual") node = id + "[\\" + label + "/]";
+            else node = id + "[" + label + "]";  // rect and every shape without a counterpart here
+        } else {
+            // a statement of nothing but `e1@{ animate: true }` is an edge's metadata, not a node
+            bool alone = trim(out.substr(0, id_begin)).empty() && trim(out.substr(close < out.size() ? close + 1 : out.size())).empty();
+            node = alone ? "" : id;
+        }
+        size_t end = close < out.size() ? close + 1 : out.size();
+        out = out.substr(0, id_begin) + node + out.substr(end);
+        if (node.empty()) break;
+    }
+    return out;
+}
+
+/// An `agentflow-beta` statement as flowchart syntax: `flow` is a subgraph, `global` a block that draws nothing, `connector` a node,
+/// `@{ shape: ... }` picks the node's shape, and a metadata line alone (`id@{ ... }`) says nothing the picture needs.
+/// An empty result means there is nothing to parse.
+std::string agentflow_statement(const std::string& line, std::vector<char>& blocks) {
+    std::string s = trim(line);
+    auto starts_with = [&](const char* kw) {
+        size_t l = std::strlen(kw);
+        return s.compare(0, l, kw) == 0 && s.size() > l && s[l] == ' ';
+    };
+    if (starts_with("flow")) {
+        blocks.push_back('f');
+        return "subgraph " + trim(s.substr(5));
+    }
+    if (s == "global") {
+        blocks.push_back('g');
+        return "";
+    }
+    if (s == "end") {
+        char top = blocks.empty() ? 'f' : blocks.back();
+        if (!blocks.empty()) blocks.pop_back();
+        return top == 'g' ? "" : "end";
+    }
+    if (starts_with("connector")) s = trim(s.substr(10));
+    size_t meta = s.find("@{");
+    if (meta == std::string::npos) return s;
+    std::string head = trim(s.substr(0, meta)), body = s.substr(meta + 2);
+    size_t close = body.rfind('}');
+    body = close == std::string::npos ? body : body.substr(0, close);
+    if (head.find_first_of("[({") == std::string::npos) return "";  // `id@{ ... }` on its own line
+    // the shape key, then the node written in the flowchart shape that matches it
+    std::string shape;
+    size_t at = body.find("shape:");
+    if (at != std::string::npos) {
+        size_t end = body.find(',', at);
+        shape = trim(body.substr(at + 6, end == std::string::npos ? std::string::npos : end - at - 6));
+        if (shape.size() >= 2 && shape.front() == '"' && shape.back() == '"') shape = shape.substr(1, shape.size() - 2);
+    }
+    size_t open = head.find('[');
+    if (open == std::string::npos || head.back() != ']') return head;
+    std::string id = head.substr(0, open), label = head.substr(open + 1, head.size() - open - 2);
+    if (shape == "task" || shape == "roundedRect" || shape == "rounded") return id + "(" + label + ")";
+    if (shape == "tool" || shape == "subroutine" || shape == "fr-rect") return id + "[[" + label + "]]";
+    if (shape == "input" || shape == "lean-right") {  // the parallelogram form takes the text bare
+        std::string bare = trim(label);
+        if (bare.size() >= 2 && bare.front() == '"' && bare.back() == '"') bare = bare.substr(1, bare.size() - 2);
+        return id + "[/" + bare + "/]";
+    }
+    if (shape == "decision" || shape == "diamond") return id + "{" + label + "}";
+    if (shape == "action" || shape == "hexagon") return id + "{{" + label + "}}";
+    if (shape == "stadium" || shape == "terminal") return id + "([" + label + "])";
+    if (shape == "circle") return id + "((" + label + "))";
+    if (shape == "cylinder" || shape == "database") return id + "[(" + label + ")]";
+    return head;
+}
+
+void append_utf8(std::string& out, unsigned cp) {
+    if (cp < 0x80) {
+        out += (char)cp;
+    } else if (cp < 0x800) {
+        out += (char)(0xC0 | (cp >> 6));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += (char)(0xE0 | (cp >> 12));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    } else {
+        out += (char)(0xF0 | (cp >> 18));
+        out += (char)(0x80 | ((cp >> 12) & 0x3F));
+        out += (char)(0x80 | ((cp >> 6) & 0x3F));
+        out += (char)(0x80 | (cp & 0x3F));
+    }
+}
+
+// A character that would break the syntax is written `#name;` or `#123;` in a label (`#quot;`, `#9829;`): decode those,
+// as Mermaid does. A `#` that does not start such a sequence stays as it is.
+std::string decode_entities(const std::string& s) {
+    if (s.find('#') == std::string::npos) return s;
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        size_t semi = s[i] == '#' ? s.find(';', i + 1) : std::string::npos;
+        if (semi != std::string::npos && semi - i >= 2 && semi - i <= 10) {
+            std::string ent = s.substr(i + 1, semi - i - 1);
+            std::string rep;
+            unsigned cp = 0;
+            if (ent == "quot") rep = "\"";
+            else if (ent == "amp") rep = "&";
+            else if (ent == "lt") rep = "<";
+            else if (ent == "gt") rep = ">";
+            else if (ent == "apos") rep = "'";
+            else if (ent.size() > 1 && ent[0] == 'x') {
+                char* end;
+                long v = std::strtol(ent.c_str() + 1, &end, 16);
+                if (*end == 0 && v > 0 && v < 0x110000) cp = (unsigned)v;
+            } else if (!ent.empty() && std::isdigit((unsigned char)ent[0])) {
+                char* end;
+                long v = std::strtol(ent.c_str(), &end, 10);
+                if (*end == 0 && v > 0 && v < 0x110000) cp = (unsigned)v;
+            }
+            if (!rep.empty() || cp) {
+                if (cp) append_utf8(rep, cp);
+                out += rep;
+                i = semi + 1;
+                continue;
+            }
+        }
+        out += s[i++];
+    }
+    return out;
+}
+
 bool parse(const std::string& source, Graph& g, std::string& error) {
     Parser p;
+    bool agentflow = false;
+    std::vector<char> blocks;
     std::vector<std::string> lines;
     std::string cur;
     bool in_quote = false;
-    for (char c : source) {
+    int depth = 0;  // inside a node's brackets a `;` is text
+    for (size_t at = 0; at < source.size(); at++) {
+        char c = source[at];
         if (c == '"') in_quote = !in_quote;
-        if (c == '\n' || (c == ';' && !in_quote)) {
+        if (!in_quote) {
+            if (c == '[' || c == '(' || c == '{') depth++;
+            else if ((c == ']' || c == ')' || c == '}') && depth > 0) depth--;
+        }
+        if (c == '\n') depth = 0;
+        if (c == '\n' && in_quote) {
+            // a line break inside a quoted label is a line break of the label, unless the quote is never closed
+            size_t close = source.find('"', at);
+            if (close != std::string::npos && source.find("\n\n", at) > close) {
+                cur += "<br/>";
+                continue;
+            }
+            in_quote = false;
+        }
+        if (c == '\n' || (c == ';' && !in_quote && depth == 0)) {
             lines.push_back(cur);
             cur.clear();
         } else if (c != '\r') {
@@ -435,17 +695,26 @@ bool parse(const std::string& source, Graph& g, std::string& error) {
 
     bool header = false;
     for (std::string line : lines) {
-        size_t cm = line.find("%%");
+        size_t cm = std::string::npos;
+        for (size_t k = 0, quotes = 0; k + 1 < line.size(); k++) {  // a `%%` inside a quoted label is text
+            if (line[k] == '"') quotes++;
+            else if (line[k] == '%' && line[k + 1] == '%' && quotes % 2 == 0) {
+                cm = k;
+                break;
+            }
+        }
         if (cm != std::string::npos) line = line.substr(0, cm);
         line = trim(line);
         if (line.empty()) continue;
         if (!header) {
             size_t sp = line.find(' ');
             std::string kw = line.substr(0, sp);
-            if (kw != "graph" && kw != "flowchart" && kw != "flowchart-elk") {
+            if (kw != "graph" && kw != "flowchart" && kw != "flowchart-elk" && kw != "swimlane-beta" && kw != "agentflow-beta") {
                 error = "not a flowchart: " + kw;
                 return false;
             }
+            p.g.swimlane = kw == "swimlane-beta";
+            agentflow = kw == "agentflow-beta";
             std::string d = sp == std::string::npos ? "TD" : trim(line.substr(sp + 1));
             if (d == "LR") p.g.dir = Direction::LR;
             else if (d == "RL") p.g.dir = Direction::RL;
@@ -453,6 +722,13 @@ bool parse(const std::string& source, Graph& g, std::string& error) {
             else p.g.dir = Direction::TD;
             header = true;
             continue;
+        }
+        if (agentflow) {
+            line = agentflow_statement(line, blocks);
+            if (line.empty()) continue;
+        } else if (line.find("@{") != std::string::npos) {
+            line = trim(expand_node_meta(line));
+            if (line.empty()) continue;
         }
         if (!p.parse_statement(line)) {
             error = "cannot parse: " + line;
@@ -463,6 +739,9 @@ bool parse(const std::string& source, Graph& g, std::string& error) {
         error = "empty diagram";
         return false;
     }
+    for (Node& n : p.g.nodes) n.label = decode_entities(n.label);
+    for (Edge& e : p.g.edges) e.label = decode_entities(e.label);
+    for (Group& gr : p.g.groups) gr.title = decode_entities(gr.title);
     for (auto& [idx, cls] : p.g.class_use) {
         auto it = p.g.classes.find(cls);
         if (it == p.g.classes.end()) continue;
@@ -474,6 +753,77 @@ bool parse(const std::string& source, Graph& g, std::string& error) {
         if (dst.stroke_width.empty()) dst.stroke_width = st.stroke_width;
         if (dst.dash.empty()) dst.dash = st.dash;
     }
+    if (!agentflow) {
+        // An empty subgraph still draws its frame and title: a hidden node (the one an edge to it made, if any) holds the place.
+        Graph& gr = p.g;
+        std::vector<char> has_child(gr.groups.size(), 0);
+        for (const Group& grp : gr.groups)
+            if (grp.parent >= 0) has_child[grp.parent] = 1;
+        for (size_t gi = 0; gi < gr.groups.size(); gi++) {
+            if (!gr.groups[gi].nodes.empty() || has_child[gi]) continue;
+            auto it = gr.index.find(gr.groups[gi].id);
+            int v;
+            bool fresh = it == gr.index.end();
+            if (!fresh) {
+                v = it->second;
+            } else {
+                Node n;
+                n.id = gr.groups[gi].id;
+                gr.nodes.push_back(n);
+                v = (int)gr.nodes.size() - 1;
+            }
+            gr.nodes[v].phantom = true;
+            gr.nodes[v].parked = !gr.swimlane;
+            gr.nodes[v].label = gr.groups[gi].title;
+            gr.nodes[v].group = (int)gi;
+            gr.groups[gi].nodes.push_back(v);
+        }
+    }
+    if (agentflow) {
+        // An edge to a container (`researcher --> designer`) made a node of that name: send it to the container's first member
+        // (as a target) or last member (as a source) instead, and drop the placeholder.
+        Graph& gr = p.g;
+        const int n = (int)gr.nodes.size();
+        std::vector<int> first(n, -1), last(n, -1);
+        std::vector<char> phantom(n, 0);
+        for (size_t gi = 0; gi < gr.groups.size(); gi++) {
+            auto it = gr.index.find(gr.groups[gi].id);
+            if (it == gr.index.end()) continue;
+            int ph = it->second;
+            for (int v = 0; v < n; v++) {
+                if (v == ph) continue;
+                for (int a = gr.nodes[v].group; a >= 0; a = gr.groups[a].parent)
+                    if (a == (int)gi) {
+                        if (first[ph] < 0) first[ph] = v;
+                        last[ph] = v;
+                        break;
+                    }
+            }
+            if (first[ph] >= 0) phantom[ph] = 1;
+        }
+        std::vector<int> remap(n, -1);
+        int kept = 0;
+        for (int v = 0; v < n; v++)
+            if (!phantom[v]) remap[v] = kept++;
+        for (Edge& e : gr.edges) {
+            if (phantom[e.from]) e.from = last[e.from];
+            if (phantom[e.to]) e.to = first[e.to];
+            e.from = remap[e.from];
+            e.to = remap[e.to];
+        }
+        std::vector<Node> nodes;
+        for (int v = 0; v < n; v++)
+            if (!phantom[v]) nodes.push_back(gr.nodes[v]);
+        gr.nodes = std::move(nodes);
+        gr.index.clear();
+        for (size_t v = 0; v < gr.nodes.size(); v++) gr.index[gr.nodes[v].id] = (int)v;
+        for (Group& grp : gr.groups) {
+            std::vector<int> members;
+            for (int v : grp.nodes)
+                if (v >= 0 && v < n && remap[v] >= 0) members.push_back(remap[v]);
+            grp.nodes = std::move(members);
+        }
+    }
     g = std::move(p.g);
     return true;
 }
@@ -483,7 +833,12 @@ bool parse(const std::string& source, Graph& g, std::string& error) {
 void size_nodes(Graph& g, const Text& text) {
     using namespace metrics;
     for (Node& n : g.nodes) {
-        n.lines = split_lines(n.label);
+        n.lines = wrap_lines(text, split_lines(n.label), kNodeFont, kNodeWeight, kWrapWidth);
+        if (n.phantom) {  // wide enough that its frame holds the subgraph's title
+            n.w = std::max(60.0, std::ceil(text.block_width({n.label}, kGroupFont, kGroupWeight)) - 8);
+            n.h = 24;
+            continue;
+        }
         double tw = text.block_width(n.lines, kNodeFont, kNodeWeight);
         double th = n.lines.size() * kNodeFont * kLineHeight;
         double w = tw + 2 * kPadX, h = th + 2 * kPadY;
@@ -536,6 +891,9 @@ void draw_node(std::string& out, const Theme& th, const Node& n, Pt c) {
         for (const Pt& q : p) s += (s.empty() ? "" : " ") + num(q.x) + "," + num(q.y);
         return s;
     };
+    if (!n.href.empty())
+        out += "<a href=\"" + esc(n.href) + "\"" + (n.target.empty() ? "" : " target=\"" + n.target + "\"") +
+               (n.tooltip.empty() ? "" : " title=\"" + esc(n.tooltip) + "\"") + ">\n";
     out += "<g class=\"node\">\n";
     switch (n.shape) {
         case Shape::Rect:
@@ -595,6 +953,7 @@ void draw_node(std::string& out, const Theme& th, const Node& n, Pt c) {
     double cy = n.shape == Shape::Cylinder ? c.y + n.h * 0.07 : c.y;
     centered_text(out, th, n.lines, c.x, cy, kNodeFont, kNodeWeight, n.style.color.empty() ? th.text : n.style.color);
     out += "</g>\n";
+    if (!n.href.empty()) out += "</a>\n";
 }
 
 void draw_arrow(std::string& out, Pt tip, Pt from, const std::string& color) {
@@ -623,28 +982,211 @@ bool render_flowchart(const std::string& source, const Options& options, std::st
     Text text{options};
     size_nodes(g, text);
 
-    std::vector<LayoutNode> ln(g.nodes.size());
+    // parked nodes (the empty subgraphs nothing points to) take no part in the layout; slot[] maps a node to its layout row
+    std::vector<int> slot(g.nodes.size(), -1);
+    std::vector<LayoutNode> ln;
     for (size_t i = 0; i < g.nodes.size(); i++) {
-        ln[i].w = g.nodes[i].w;
-        ln[i].h = g.nodes[i].h;
-        ln[i].group = g.nodes[i].group;
+        if (g.nodes[i].parked) continue;
+        slot[i] = (int)ln.size();
+        LayoutNode n;
+        n.w = g.nodes[i].w;
+        n.h = g.nodes[i].h;
+        n.group = g.nodes[i].group;
         Shape s = g.nodes[i].shape;
-        ln[i].outline = s == Shape::Diamond ? 1 : (s == Shape::Circle || s == Shape::DoubleCircle ? 2 : 0);
+        n.outline = s == Shape::Diamond ? 1 : (s == Shape::Circle || s == Shape::DoubleCircle ? 2 : 0);
+        ln.push_back(n);
     }
     std::vector<LayoutEdge> le(g.edges.size());
     std::vector<std::vector<std::string>> label_lines(g.edges.size());
     for (size_t i = 0; i < g.edges.size(); i++) {
-        le[i].from = g.edges[i].from;
-        le[i].to = g.edges[i].to;
+        le[i].from = slot[g.edges[i].from];
+        le[i].to = slot[g.edges[i].to];
         if (!g.edges[i].label.empty()) {
-            label_lines[i] = split_lines(g.edges[i].label);
+            label_lines[i] = wrap_lines(text, split_lines(g.edges[i].label), kEdgeFont, kEdgeWeight, kWrapWidth);
             le[i].label_w = text.block_width(label_lines[i], kEdgeFont, kEdgeWeight) + 16;
             le[i].label_h = label_lines[i].size() * kEdgeFont * kLineHeight + 16;
         }
     }
     std::vector<int> group_parent;
-    for (const Group& gr : g.groups) group_parent.push_back(gr.parent);
-    LayoutResult lay = layout_layered(ln, le, g.dir, group_parent);
+    std::vector<double> group_min_w;  // a frame is wide enough for its title (the drawing widens it the same way)
+    for (const Group& gr : g.groups) {
+        group_parent.push_back(gr.parent);
+        group_min_w.push_back(std::ceil(text.width(gr.title, kGroupFont, kGroupWeight)) + 24 + 4);
+    }
+    LayoutResult lay;
+    SwimResult swim;
+    std::vector<std::string> lane_titles;
+    if (g.swimlane) {
+        // a node's lane is the top-level subgraph it sits in; nodes outside any subgraph share a lane of their own at the end
+        std::vector<int> lane_of_group(g.groups.size(), -1);
+        for (size_t gi = 0; gi < g.groups.size(); gi++)
+            if (g.groups[gi].parent < 0) {
+                lane_of_group[gi] = (int)lane_titles.size();
+                lane_titles.push_back(g.groups[gi].title);
+            }
+        std::vector<SwimNode> sn(g.nodes.size());
+        int loose = -1;
+        for (size_t i = 0; i < g.nodes.size(); i++) {
+            sn[i].w = g.nodes[i].w;
+            sn[i].h = g.nodes[i].h;
+            int gi = g.nodes[i].group;
+            while (gi >= 0 && g.groups[gi].parent >= 0) gi = g.groups[gi].parent;
+            if (gi >= 0) {
+                sn[i].lane = lane_of_group[gi];
+            } else {
+                if (loose < 0) {
+                    loose = (int)lane_titles.size();
+                    lane_titles.push_back("");
+                }
+                sn[i].lane = loose;
+            }
+        }
+        swim = layout_swimlane(sn, le, (int)lane_titles.size(), g.dir, 30, 120);
+        lay = swim.lay;
+    } else {
+        std::vector<LayoutEdge> le_in;  // the edges the layout sees: those between nodes it knows
+        std::vector<int> le_at;
+        for (size_t i = 0; i < le.size(); i++)
+            if (le[i].from >= 0 && le[i].to >= 0) le_in.push_back(le[i]), le_at.push_back((int)i);
+        LayoutResult in = layout_layered(ln, le_in, g.dir, group_parent, group_min_w);
+        lay = in;
+        lay.points.assign(le.size(), {});
+        lay.label_center.assign(le.size(), Pt{0, 0});
+        for (size_t k = 0; k < le_at.size(); k++) {
+            lay.points[le_at[k]] = in.points[k];
+            lay.label_center[le_at[k]] = in.label_center[k];
+        }
+        // back to node numbering; each parked frame is set after the drawing, across the layers (beside it for top-down, below it for left-right)
+        std::vector<Pt> center(g.nodes.size());
+        const bool across_x = g.dir == Direction::TD || g.dir == Direction::BT;
+        double next = across_x ? lay.width : lay.height;
+        for (size_t i = 0; i < g.nodes.size(); i++)
+            if (slot[i] >= 0) center[i] = lay.center[slot[i]];
+        std::vector<char> placed(g.nodes.size(), 0);
+        for (size_t i = 0; i < g.nodes.size(); i++) placed[i] = slot[i] >= 0;
+        constexpr double kPad = 16, kHead = 26, kGap = 32, kNear = 12;
+        // the number of frames between a node and `anchor` (the node's own group counts, the anchor itself too), or -1 if it is not inside it
+        auto frames_up_to = [&](int v, int anchor) {
+            int k = 0;
+            for (int a = g.nodes[v].group; a >= 0; a = g.groups[a].parent) {
+                k++;
+                if (a == anchor) return k;
+            }
+            return -1;
+        };
+        for (size_t i = 0; i < g.nodes.size(); i++) {
+            if (slot[i] >= 0) continue;
+            const Node& n = g.nodes[i];
+            // the nearest enclosing subgraph that has a member in the drawing already
+            int anchor = -1;
+            for (int a = g.groups[n.group].parent; a >= 0 && anchor < 0; a = g.groups[a].parent)
+                for (size_t v = 0; v < g.nodes.size(); v++)
+                    if (placed[v] && frames_up_to((int)v, a) > 0) {
+                        anchor = a;
+                        break;
+                    }
+            if (anchor < 0) {  // in no frame: beside the whole drawing, past every frame that is drawn there
+                double edge = next;
+                for (size_t v = 0; v < g.nodes.size(); v++) {
+                    if (!placed[v]) continue;
+                    int depth = 0;
+                    for (int a = g.nodes[v].group; a >= 0; a = g.groups[a].parent) depth++;
+                    edge = std::max(edge, across_x ? center[v].x + g.nodes[v].w / 2 + depth * kPad : center[v].y + g.nodes[v].h / 2 + depth * kPad);
+                }
+                if (across_x) {
+                    center[i] = {edge + kGap + kPad + n.w / 2, kHead + kPad + n.h / 2};
+                    next = edge + kGap + n.w + 2 * kPad;
+                } else {
+                    center[i] = {kPad + n.w / 2, edge + kGap + kHead + kPad + n.h / 2};
+                    next = edge + kGap + n.h + 2 * kPad + kHead;
+                }
+                placed[i] = 1;
+                continue;
+            }
+            // inside the anchor's frame: beside its members (right of them top-down, below them left-right), and everything that
+            // lay past the frame on that side moves over to make room
+            double inner_lo_x = 1e18, inner_lo_y = 1e18, inner_hi_x = -1e18, inner_hi_y = -1e18;
+            for (size_t v = 0; v < g.nodes.size(); v++) {
+                int k = placed[v] ? frames_up_to((int)v, anchor) : -1;
+                if (k < 0) continue;
+                double nest = (k - 1) * kPad, head = (k - 1) * (kPad + kHead);
+                inner_lo_x = std::min(inner_lo_x, center[v].x - g.nodes[v].w / 2 - nest);
+                inner_hi_x = std::max(inner_hi_x, center[v].x + g.nodes[v].w / 2 + nest);
+                inner_lo_y = std::min(inner_lo_y, center[v].y - g.nodes[v].h / 2 - head);
+                inner_hi_y = std::max(inner_hi_y, center[v].y + g.nodes[v].h / 2 + nest);
+            }
+            const double fw = n.w + 2 * kPad, fh = n.h + 2 * kPad + kHead;
+            double cut = across_x ? inner_hi_x + kPad : inner_hi_y + kPad, shift = (across_x ? fw : fh) + kNear;
+            auto moves = [&](double at) { return at >= cut - 1e-6; };
+            for (size_t v = 0; v < g.nodes.size(); v++)
+                if (placed[v] && frames_up_to((int)v, anchor) < 0 && moves(across_x ? center[v].x : center[v].y)) (across_x ? center[v].x : center[v].y) += shift;
+            for (auto& pts : lay.points)
+                for (Pt& p : pts)
+                    if (moves(across_x ? p.x : p.y)) (across_x ? p.x : p.y) += shift;
+            for (Pt& p : lay.label_center)
+                if (moves(across_x ? p.x : p.y)) (across_x ? p.x : p.y) += shift;
+            (across_x ? lay.width : lay.height) += shift;
+            // the new frame may also be longer than the members along the other axis: whatever lies past the anchor's frame there moves too
+            double over = across_x ? inner_lo_y + fh - inner_hi_y : inner_lo_x + fw - inner_hi_x;
+            if (over > 0) {
+                const double cut2 = (across_x ? inner_hi_y : inner_hi_x) + kPad;
+                auto moves2 = [&](double at) { return at >= cut2 - 1e-6; };
+                for (size_t v = 0; v < g.nodes.size(); v++)
+                    if (placed[v] && frames_up_to((int)v, anchor) < 0 && moves2(across_x ? center[v].y : center[v].x)) (across_x ? center[v].y : center[v].x) += over;
+                for (auto& pts : lay.points)
+                    for (Pt& p : pts)
+                        if (moves2(across_x ? p.y : p.x)) (across_x ? p.y : p.x) += over;
+                for (Pt& p : lay.label_center)
+                    if (moves2(across_x ? p.y : p.x)) (across_x ? p.y : p.x) += over;
+                (across_x ? lay.height : lay.width) += over;
+            }
+            if (across_x) center[i] = {inner_hi_x + kNear + kPad + n.w / 2, inner_lo_y + kHead + kPad + n.h / 2};
+            else center[i] = {inner_lo_x + kPad + n.w / 2, inner_hi_y + kNear + kHead + kPad + n.h / 2};
+            // level with the node it is connected to when the members' frame is long enough along that axis, so the edge runs
+            // straight across instead of slanting from the corner
+            for (const Edge& e : g.edges) {
+                int other = e.from == (int)i ? e.to : e.to == (int)i ? e.from : -1;
+                if (other < 0 || other == (int)i || !placed[other] || frames_up_to(other, anchor) < 0) continue;
+                if (across_x) {
+                    double lo_c = inner_lo_y + kHead + kPad + n.h / 2, hi_c = inner_hi_y - kPad - n.h / 2;
+                    if (hi_c > lo_c) center[i].y = std::max(lo_c, std::min(hi_c, center[other].y));
+                } else {
+                    double lo_c = inner_lo_x + kPad + n.w / 2, hi_c = inner_hi_x - kPad - n.w / 2;
+                    if (hi_c > lo_c) center[i].x = std::max(lo_c, std::min(hi_c, center[other].x));
+                }
+                break;
+            }
+            placed[i] = 1;
+        }
+        lay.center = center;
+        // an edge to a parked frame runs straight between the two, from the border of one box to the border of the other
+        auto box = [&](int v) {
+            const Node& n = g.nodes[v];
+            const bool frame = n.parked;
+            struct R { double x0, y0, x1, y1; } r{center[v].x - n.w / 2, center[v].y - n.h / 2, center[v].x + n.w / 2, center[v].y + n.h / 2};
+            if (frame) r = {r.x0 - 16, r.y0 - 16 - 26, r.x1 + 16, r.y1 + 16};
+            return r;
+        };
+        auto edge_of = [&](int v, Pt toward) {  // where the line from v's centre to `toward` leaves v's box
+            auto r = box(v);
+            double dx = toward.x - center[v].x, dy = toward.y - center[v].y;
+            double t = 1e18;
+            if (dx > 1e-9) t = std::min(t, (r.x1 - center[v].x) / dx);
+            if (dx < -1e-9) t = std::min(t, (r.x0 - center[v].x) / dx);
+            if (dy > 1e-9) t = std::min(t, (r.y1 - center[v].y) / dy);
+            if (dy < -1e-9) t = std::min(t, (r.y0 - center[v].y) / dy);
+            t = std::min(t, 1.0);
+            return Pt{center[v].x + dx * t, center[v].y + dy * t};
+        };
+        for (size_t i = 0; i < g.edges.size(); i++) {
+            int a = g.edges[i].from, b = g.edges[i].to;
+            if (!g.nodes[a].parked && !g.nodes[b].parked) continue;
+            if (a == b) continue;
+            Pt p = edge_of(a, center[b]), q = edge_of(b, center[a]);
+            lay.points[i] = {p, q};
+            lay.label_center[i] = {(p.x + q.x) / 2, (p.y + q.y) / 2};
+        }
+    }
 
     // subgraph frames around their members (children first so a parent covers them)
     struct Frame {
@@ -665,9 +1207,12 @@ bool render_flowchart(const std::string& source, const Options& options, std::st
         if (!frames[gi].used) continue;
         Frame& f = frames[gi];
         f = {f.x0 - kFramePad, f.y0 - kFramePad - kHeader, f.x1 + kFramePad, f.y1 + kFramePad, true};
+        if (!g.swimlane) f.x1 = std::max(f.x1, f.x0 + std::ceil(text.width(g.groups[gi].title, kGroupFont, kGroupWeight)) + 24);  // the title fits in its bar
         int p = g.groups[gi].parent;
         if (p >= 0) grow(frames[p], f.x0, f.y0, f.x1, f.y1);
     }
+    if (g.swimlane)
+        for (Frame& f : frames) f.used = false;  // the lanes are drawn instead of the subgraph frames
     // the drawing's box: the layout plus the frames, with a margin
     double x0 = 0, y0 = 0, x1 = lay.width, y1 = lay.height;
     for (const Frame& f : frames)
@@ -687,10 +1232,20 @@ bool render_flowchart(const std::string& source, const Options& options, std::st
         body += "<g class=\"subgraph\">\n<rect x=\"" + num(f.x0 + ox) + "\" y=\"" + num(f.y0 + oy) + "\" width=\"" + num(f.x1 - f.x0) + "\" height=\"" + num(f.y1 - f.y0) +
                 "\" rx=\"2\" ry=\"2\" fill=\"" + th.group_fill + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
         body += "<rect x=\"" + num(f.x0 + ox) + "\" y=\"" + num(f.y0 + oy) + "\" width=\"" + num(f.x1 - f.x0) + "\" height=\"" + num(kHeader) +
-                "\" rx=\"2\" ry=\"2\" fill=\"" + th.group_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+                "\" rx=\"2\" ry=\"2\" fill=\"" + th.cluster_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
         body += "<text x=\"" + num(f.x0 + ox + 12) + "\" y=\"" + num(f.y0 + oy + kHeader / 2 + kGroupFont * 0.35) + "\" font-size=\"" + num(kGroupFont) +
                 "\" font-weight=\"" + std::to_string(kGroupWeight) + "\" font-family=\"" + esc(th.font) + "\" fill=\"" + th.text + "\">" + esc(g.groups[gi].title) + "</text>\n</g>\n";
     }
+    for (size_t li = 0; li < swim.lanes.size(); li++) {
+        const SwimLane& lane = swim.lanes[li];
+        double lx = lane.x0 + ox, ly = lane.y0 + oy, lw = lane.x1 - lane.x0, lh = lane.y1 - lane.y0;
+        body += "<g class=\"lane\">\n<rect x=\"" + num(lx) + "\" y=\"" + num(ly) + "\" width=\"" + num(lw) + "\" height=\"" + num(lh) + "\" fill=\"" + th.group_fill + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        double hw = swim.lanes_are_columns ? lw : lane.header, hh = swim.lanes_are_columns ? lane.header : lh;
+        body += "<rect x=\"" + num(lx) + "\" y=\"" + num(ly) + "\" width=\"" + num(hw) + "\" height=\"" + num(hh) + "\" fill=\"" + th.cluster_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        centered_text(body, th, split_lines(lane_titles[li]), lx + hw / 2, ly + hh / 2, kGroupFont, kGroupWeight, th.text);
+        body += "</g>\n";
+    }
+    if (!g.swimlane) clear_frame_borders(lay.points, lay.label_center, le, frames);
     // edges
     for (size_t i = 0; i < g.edges.size(); i++) {
         const Edge& e = g.edges[i];
@@ -706,7 +1261,21 @@ bool render_flowchart(const std::string& source, const Options& options, std::st
         for (const Pt& p : lay.points[i]) pts.push_back(at(p));
         std::string list;
         for (const Pt& p : pts) list += (list.empty() ? "" : " ") + num(p.x) + "," + num(p.y);
-        body += "<polyline class=\"edge\" points=\"" + list + "\" fill=\"none\"" + stroke_attrs(color, width, dash) + " stroke-linejoin=\"round\"/>\n";
+        if (g.swimlane && pts.size() > 2) {
+            // the official swimlane edges bend with rounded corners
+            std::string d = "M" + num(pts[0].x) + " " + num(pts[0].y);
+            for (size_t k = 1; k + 1 < pts.size(); k++) {
+                double ax = pts[k].x - pts[k - 1].x, ay = pts[k].y - pts[k - 1].y, bx = pts[k + 1].x - pts[k].x, by = pts[k + 1].y - pts[k].y;
+                double la = std::sqrt(ax * ax + ay * ay), lb = std::sqrt(bx * bx + by * by);
+                if (la < 1e-6 || lb < 1e-6) continue;
+                double rr = std::min(8.0, std::min(la, lb) / 2);
+                d += " L" + num(pts[k].x - ax / la * rr) + " " + num(pts[k].y - ay / la * rr) + " Q" + num(pts[k].x) + " " + num(pts[k].y) + " " + num(pts[k].x + bx / lb * rr) + " " + num(pts[k].y + by / lb * rr);
+            }
+            d += " L" + num(pts.back().x) + " " + num(pts.back().y);
+            body += "<path class=\"edge\" d=\"" + d + "\" fill=\"none\"" + stroke_attrs(color, width, dash) + " stroke-linejoin=\"round\"/>\n";
+        } else {
+            body += "<polyline class=\"edge\" points=\"" + list + "\" fill=\"none\"" + stroke_attrs(color, width, dash) + " stroke-linejoin=\"round\"/>\n";
+        }
         if (e.arrow_end) draw_arrow(body, pts.back(), pts[pts.size() - 2], color == th.line ? th.arrow : color);
         if (e.arrow_start) draw_arrow(body, pts.front(), pts[1], color == th.line ? th.arrow : color);
     }
@@ -714,11 +1283,12 @@ bool render_flowchart(const std::string& source, const Options& options, std::st
         if (label_lines[i].empty() || g.edges[i].kind == Kind::Invisible) continue;
         Pt c = at(lay.label_center[i]);
         body += "<g class=\"edge-label\">\n<rect x=\"" + num(c.x - le[i].label_w / 2) + "\" y=\"" + num(c.y - le[i].label_h / 2) + "\" width=\"" + num(le[i].label_w) +
-                "\" height=\"" + num(le[i].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.bg + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\"/>\n";
+                "\" height=\"" + num(le[i].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.label_bg + "\" stroke=\"" + th.label_stroke + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, label_lines[i], c.x, c.y, kEdgeFont, kEdgeWeight, th.text_sec);
         body += "</g>\n";
     }
-    for (size_t i = 0; i < g.nodes.size(); i++) draw_node(body, th, g.nodes[i], at(lay.center[i]));
+    for (size_t i = 0; i < g.nodes.size(); i++)
+        if (!g.nodes[i].phantom) draw_node(body, th, g.nodes[i], at(lay.center[i]));
 
     svg = svg_document(th, (x1 - x0) + 2 * kMargin, (y1 - y0) + 2 * kMargin, body);
     return true;

@@ -145,6 +145,30 @@ namespace litehtml
 		std::shared_ptr<const element>	get_over_element() const { return m_over_element; }
 
 		void							append_children_from_string(element& parent, const char* str, bool replace_existing);
+
+		// P0 probe of the live-layout design (doc/design/live-layout-incremental.md): redo the style and layout phases
+		// of createFromString on the tree that already exists and report the time of each phase in ms.
+		// mode 0: reapply every stylesheet (what a class / id / attribute change needs)
+		// mode 1: refresh_styles only (re-evaluates the selectors the element already holds)
+		struct live_timing { double clear = 0, apply = 0, compute = 0, tree = 0, layout = 0; bool paint_only = false; };
+		live_timing live_probe(pixel_t max_width, int mode);
+
+		// Live layout (doc/design/live-layout-incremental.md, P1): change one attribute of an element of this document
+		// (value == nullptr removes it). The styles are not recomputed until live_relayout().
+		bool							live_set_attr(const std::shared_ptr<element>& el, const char* name, const char* value);
+		// Restyle only what the changed elements can affect, rebuild the render tree and lay out again.
+		// `changed`: elements whose attributes changed; `scopes`: subtrees to restyle as they are (see live_set_children).
+		live_timing						live_relayout(const std::vector<std::shared_ptr<element>>& changed, const std::vector<std::shared_ptr<element>>& scopes, pixel_t max_width, bool attrs_only = false);
+		// Replace the children of `parent` by the elements `html` parses to (as if parsed in a <body>). The new elements are
+		// styled by the next live_relayout(), which should list `parent` among the changed elements.
+		bool							live_parse_fragment(const char* html, std::vector<std::shared_ptr<element>>& out);
+		// Make `list` the children of `parent`: an element of the list that was somewhere else is taken from there, one that is
+		// not in the list any more is let go. `fresh` are the elements just parsed. Returns the subtrees whose styles may change.
+		std::vector<std::shared_ptr<element>> live_set_children(const std::shared_ptr<element>& parent,
+			const std::vector<std::shared_ptr<element>>& list, const std::vector<std::shared_ptr<element>>& fresh);
+	private:
+		std::vector<std::shared_ptr<element>> m_live_new;
+	public:
 		void							dump(dumper& cout);
 
 		void							add_custom_property(const custom_property_definition& def) { m_custom_properties[def.name] = def; }
@@ -184,6 +208,7 @@ namespace litehtml
 		void create_node(void* gnode, elements_list& elements, bool parseTextNode, bool process_root);
 		bool update_media_lists(const media_features& features);
 		void fix_tables_layout();
+		void drop_render_links();
 		void fix_table_children(const std::shared_ptr<render_item>& el_ptr, style_display disp, const char* disp_str);
 		void fix_table_parent(const std::shared_ptr<render_item> & el_ptr, style_display disp, const char* disp_str);
 	};

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 #include "mermaid/classdiagram.h"
 #include "mermaid/erdiagram.h"
@@ -28,6 +29,11 @@
 #include "mermaid/venn.h"
 #include "mermaid/ishikawa.h"
 #include "mermaid/treeview.h"
+#include "mermaid/usecase.h"
+#include "mermaid/eventmodeling.h"
+#include "mermaid/railroad.h"
+#include "mermaid/cynefin.h"
+#include "mermaid/wardley.h"
 #include "mermaid/timeline.h"
 #include "mermaid/xychart.h"
 
@@ -118,6 +124,64 @@ void apply_config(const std::string& cfg, Options& o) {
     set("lineColor", o.line);
     set("secondaryTextColor", o.muted);
     set("accentColor", o.accent);
+    set("arrowheadColor", o.arrow);
+    set("clusterBkg", o.group_fill);
+    // the aliases and the other roles themeVariables can name
+    set("mainBkg", o.surface);
+    set("nodeBorder", o.border);
+    set("nodeTextColor", o.fg);
+    set("noteBkgColor", o.note_fill);
+    set("noteBorderColor", o.note_border);
+    set("noteTextColor", o.note_text);
+    set("edgeLabelBackground", o.label_fill);
+    set("actorBorder", o.actor_border);
+    set("actorBkg", o.surface);
+    // series colours: pie1..pie12 (pie chart) or cScale0..cScale11, in order
+    std::string scale;
+    for (int i = 0; i < 12; i++) {
+        std::string v = find_value(cfg, ("pie" + std::to_string(i + 1)).c_str());
+        if (v.empty()) v = find_value(cfg, ("cScale" + std::to_string(i)).c_str());
+        if (v.empty()) break;
+        scale += (scale.empty() ? "" : ",") + v;
+    }
+    if (!scale.empty()) o.scale = scale;
+    // arrow heads follow the line (official themes) or the accent unless the config names them
+    if (find_value(cfg, "arrowheadColor").empty()) {
+        if (!find_value(cfg, "lineColor").empty() && !o.arrow.empty()) o.arrow = o.line;
+        else if (!find_value(cfg, "accentColor").empty()) o.arrow.clear();
+    }
+}
+
+// Markdown strings (`"`**bold** and *italic*`"`, Mermaid 11+): the text is drawn plain, one style per label, so the
+// markers go and a line break becomes <br/>. Labels without a backtick are left alone.
+std::string flatten_markdown_strings(const std::string& source) {
+    if (source.find("\"`") == std::string::npos) return source;
+    std::string out;
+    size_t i = 0;
+    while (i < source.size()) {
+        size_t open = source.find("\"`", i);
+        size_t close = open == std::string::npos ? std::string::npos : source.find("`\"", open + 2);
+        if (close == std::string::npos) break;
+        out += source.substr(i, open - i) + "\"";
+        std::string body = source.substr(open + 2, close - open - 2), text;
+        for (size_t k = 0; k < body.size(); k++) {
+            char c = body[k];
+            if (c == '\r') continue;
+            if (c == '\n') {
+                text += "<br/>";
+                while (k + 1 < body.size() && (body[k + 1] == ' ' || body[k + 1] == '\t')) k++;  // indentation of the continuation line
+            } else if (c == '*' || (c == '_' && k + 1 < body.size() && body[k + 1] == '_')) {
+                while (k + 1 < body.size() && body[k + 1] == c) k++;  // **, ***, __: the marker only
+                if (c == '_') continue;
+            } else {
+                text += c;
+            }
+        }
+        // `*italic*` has lost its markers above; a lone * between words was a marker too
+        out += text + "\"";
+        i = close + 2;
+    }
+    return out + source.substr(i);
 }
 
 // Drops `%%{ ... }%%` directives (they may span lines) and returns their text.
@@ -144,6 +208,7 @@ static bool render_once(const std::string& input, const Options& base, std::stri
     std::string source = input;
     Options options = base;
     std::string config = take_frontmatter(source) + "\n" + take_directives(source);
+    source = flatten_markdown_strings(source);
     if (options.allow_directives) apply_config(config, options);
     // the first line that is not blank or a comment names the diagram
     size_t i = 0;
@@ -159,7 +224,7 @@ static bool render_once(const std::string& input, const Options& base, std::stri
         if (e == std::string::npos) break;
         i = e + 1;
     }
-    if (keyword == "graph" || keyword == "flowchart" || keyword == "flowchart-elk") return render_flowchart(source, options, svg, error);
+    if (keyword == "graph" || keyword == "flowchart" || keyword == "flowchart-elk" || keyword == "swimlane-beta" || keyword == "agentflow-beta") return render_flowchart(source, options, svg, error);
     if (keyword == "stateDiagram" || keyword == "stateDiagram-v2") return render_state(source, options, svg, error);
     if (keyword == "classDiagram" || keyword == "classDiagram-v2") return render_class(source, options, svg, error);
     if (keyword == "erDiagram") return render_er(source, options, svg, error);
@@ -180,6 +245,11 @@ static bool render_once(const std::string& input, const Options& base, std::stri
     if (keyword == "venn-beta" || keyword == "venn") return render_venn(source, options, svg, error);
     if (keyword == "ishikawa-beta" || keyword == "ishikawa") return render_ishikawa(source, options, svg, error);
     if (keyword == "treeView-beta" || keyword == "treeView") return render_treeview(source, options, svg, error);
+    if (keyword == "wardley-beta" || keyword == "wardley") return render_wardley(source, options, svg, error);
+    if (keyword == "cynefin-beta" || keyword == "cynefin") return render_cynefin(source, options, svg, error);
+    if (keyword == "railroad-ebnf-beta" || keyword == "railroad-abnf-beta" || keyword == "railroad-peg-beta" || keyword == "railroad-beta") return render_railroad(source, options, svg, error);
+    if (keyword == "eventmodeling") return render_eventmodeling(source, options, svg, error);
+    if (keyword == "usecase-beta" || keyword == "usecase") return render_usecase(source, options, svg, error);
     if (keyword == "timeline") return render_timeline(source, options, svg, error);
     if (keyword == "mindmap")return render_mindmap(source, options, svg, error);
     if (keyword == "gantt")return render_gantt(source, options, svg, error);
@@ -193,7 +263,7 @@ namespace {
 
 const char* const kKeywords[] = {"graph", "flowchart", "stateDiagram", "stateDiagram-v2", "classDiagram", "erDiagram", "xychart-beta", "xychart", "journey", "quadrantChart", "gitGraph", "kanban",
                                  "packet-beta", "sankey-beta", "requirementDiagram", "block-beta", "timeline", "mindmap", "gantt", "pie", "sequenceDiagram", "treemap-beta", "radar-beta", "info",
-                                 "architecture-beta", "C4Context", "C4Container", "C4Component", "C4Dynamic", "C4Deployment", "venn-beta", "ishikawa-beta", "treeView-beta"};
+                                 "architecture-beta", "C4Context", "C4Container", "C4Component", "C4Dynamic", "C4Deployment", "venn-beta", "ishikawa-beta", "treeView-beta", "swimlane-beta", "agentflow-beta", "usecase-beta", "eventmodeling", "railroad-ebnf-beta", "cynefin-beta", "wardley-beta"};
 
 std::string lower(std::string s) {
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
@@ -321,7 +391,62 @@ static void take_accessibility(std::string& source, std::string& title, std::str
     source = out;
 }
 
+// A frontmatter `title:` is drawn above the diagram, as Mermaid draws it: the canvas grows by a band, the
+// drawing shifts down into it, and the title sits centred in the band.
+void add_title_band(std::string& svg, const std::string& title, const Options& options) {
+    size_t vb = svg.find("viewBox=\"0 0 ");
+    if (vb == std::string::npos) return;
+    size_t vs = vb + 13, ve = svg.find('"', vs);
+    if (ve == std::string::npos) return;
+    char* e1 = nullptr;
+    double w = std::strtod(svg.c_str() + vs, &e1);
+    double h = e1 ? std::strtod(e1, nullptr) : 0;
+    if (w <= 0 || h <= 0) return;
+    constexpr double kBand = 36;
+    svg.replace(vs, ve - vs, num(w) + " " + num(h + kBand));
+    size_t ha = svg.find("height=\"", ve);
+    if (ha != std::string::npos) {
+        size_t hs = ha + 8, he = svg.find('"', hs);
+        if (he != std::string::npos) svg.replace(hs, he - hs, num(h + kBand));
+    }
+    size_t root_end = svg.find('>');
+    if (root_end == std::string::npos) return;
+    size_t at = root_end + 1;
+    if (svg.compare(at + 1, 5, "<rect") == 0) {  // a painted background comes first (on its own line) and grows too
+        size_t re = svg.find("/>", at);
+        if (re == std::string::npos) return;
+        size_t bh = svg.find("height=\"", at);
+        if (bh != std::string::npos && bh < re) {
+            size_t bs = bh + 8, be = svg.find('"', bs);
+            if (be != std::string::npos && be < re) svg.replace(bs, be - bs, num(h + kBand));
+        }
+        at = svg.find("/>", at) + 2;
+    }
+    svg.insert(at, "\n<text x=\"" + num(w / 2) + "\" y=\"" + num(kBand / 2 + 6) + "\" text-anchor=\"middle\" font-size=\"16\" font-weight=\"600\" font-family=\"" +
+                       esc(options.font_family) + "\" fill=\"" + esc(options.fg) + "\">" + esc(title) + "</text>\n<g transform=\"translate(0 " + num(kBand) + ")\">\n");
+    size_t close = svg.rfind("</svg>");
+    if (close != std::string::npos) svg.insert(close, "</g>\n");
+}
+
 bool render(const std::string& input, const Options& options, std::string& svg, std::string& error, std::vector<std::string>* warnings) {
+    if (options.max_source_bytes && input.size() > options.max_source_bytes) {
+        error = "the diagram source is too large (" + std::to_string(input.size()) + " bytes; the limit is " + std::to_string(options.max_source_bytes) + ")";
+        return false;
+    }
+    if (options.max_lines) {
+        size_t lines = 0;
+        for (size_t i = 0; i < input.size();) {
+            size_t e = input.find('\n', i);
+            std::string line = litehtml::svgutil::trim(input.substr(i, e == std::string::npos ? std::string::npos : e - i));
+            if (!line.empty() && line.compare(0, 2, "%%") != 0) lines++;
+            if (e == std::string::npos) break;
+            i = e + 1;
+        }
+        if (lines > options.max_lines) {
+            error = "the diagram has too many lines (" + std::to_string(lines) + "; the limit is " + std::to_string(options.max_lines) + ")";
+            return false;
+        }
+    }
     std::string source = input;
     std::string acc_title, acc_descr;
     take_accessibility(source, acc_title, acc_descr);
@@ -336,6 +461,8 @@ bool render(const std::string& input, const Options& options, std::string& svg, 
     bool tried_close = false;
     for (int round = 0; round < 40; round++) {
         if (render_once(source, options, svg, error)) {
+            std::string fm_src = source, fm_title = find_value(take_frontmatter(fm_src), "title");
+            if (!fm_title.empty()) add_title_band(svg, fm_title, options);
             size_t root_end = svg.find('>');
             if ((!acc_title.empty() || !acc_descr.empty()) && root_end != std::string::npos) {
                 std::string text;
@@ -418,13 +545,35 @@ struct Preset {
     const char* surface;
     const char* accent;  // empty: derived from fg and bg
     const char* line;
+    // the rest only for the themes that follow the official Mermaid colours; empty: derived
+    const char* arrow = "";
+    const char* group_fill = "";
+    const char* group_header = "";
+    const char* label_fill = "";
+    const char* note_fill = "";
+    const char* note_border = "";
+    const char* note_text = "";
+    const char* scale = "";
+    const char* scale_stroke = "";
+    const char* plot = "";
+    const char* muted = "";  // secondary text; the official themes use the text colour
+    const char* composite_fill = "";
+    const char* composite_header = "";
+    const char* actor_border = "";
+    const char* domains = "";
+    const char* evolution = "";
+    const char* component_fill = "";
+    const char* cliff = "";
+    const char* label_color = "";
 };
 
 const Preset kPresets[] = {
-    {"light", "#1f2328", "#ffffff", "", "", "", ""},
-    {"dark", "#e6edf3", "#0d1117", "#3d444d", "#151b23", "", ""},
-    {"neutral", "#222222", "#ffffff", "#999999", "#eeeeee", "", ""},
-    {"forest", "#1b3a2a", "#ffffff", "#8fbf9f", "#e8f5ec", "#2e8b57", "#2e8b57"},
+    // light, dark, forest and neutral are the official default, dark, forest and neutral themes, measured from
+    // the colours mermaid 12.2 draws (see doc/design/mermaid-theme-parity.md); the others are this engine's own.
+    {"light", "#333333", "#ffffff", "#9370db", "#ececff", "", "#333333", "#333333", "#ffffde", "#ffffde", "#f4f4f4", "#fff5ad", "#aaaa33", "#000000", "#ececff,#ffffde,#b5ff20,#b9b9ff,#ffff45,#d7ff86,#ff86ff,#20ffff,#ff2020,#ff20ff,#20ff90,#ff5353", "#000000", "#ececff,#8493a6,#ffc3a0,#dcdde1,#b8e994,#d1a36f,#c3cde6,#ffb6c1,#496078,#f8f3e3", "#333333", "#ffffff", "#ececff", "#9370db", "#E8F5E9,#E3F2FD,#FBE9E7,#FFF8E1,#F3E5F5", "#dc3545", "#ffffff", "#8B0000", "#131300"},
+    {"dark", "#cccccc", "#333333", "#cccccc", "#1f2020", "", "#d3d3d3", "#d3d3d3", "#474949", "#474949", "#464646", "#474949", "#2f2f2f", "#b8b6b6", "#0b0000,#4d1037,#3f5258,#4f2f1b,#6e0a0a,#3b0048,#995a01,#154706,#161722,#00296f,#01629c,#cccccc", "#000000", "#3498db,#2ecc71,#e74c3c,#f1c40f,#bdc3c7,#ffffff,#34495e,#9b59b6,#1abc9c,#e67e22", "#cccccc", "#333333", "#1f2020", "#cccccc", "#1B5E20,#0D47A1,#BF360C,#F57F17,#4A148C", "#ff6b6b", "#1f2020", "#FF6B6B", "#e0dfdf"},
+    {"neutral", "#000000", "#ffffff", "#d5d5d5", "#eeeeee", "", "#666666", "#666666", "#fcfcfc", "#fcfcfc", "#ffffff", "#666666", "#999999", "#ffffff", "#f4f4f4,#555555,#bbbbbb,#777777,#999999,#dddddd,#ffffff,#dddddd,#bbbbbb,#999999,#777777,#555555", "#000000", "#eeeeee,#6bb8e4,#8acb88,#c7acd6,#e8dcc2,#ffb2a8,#fff380,#7e8d91,#ffd8b1,#faf3e0", "#000000", "#ffffff", "#eeeeee", "#d4d4d4", "#E8F5E9,#E3F2FD,#FBE9E7,#FFF8E1,#F3E5F5", "#dc3545", "#ffffff", "#8B0000", "#111111"},
+    {"forest", "#000000", "#ffffff", "#abb594", "#cde498", "", "#000000", "#000000", "#cdffb2", "#cdffb2", "#f4f4f4", "#fff5ad", "#6eaa49", "#000000", "#cde498,#cdffb2,#e1efc0,#8cb42f,#6aff19,#33b42f,#70d990,#d99070,#98cde4,#1a6330,#63301a,#1a4d63", "#000000", "#cde498,#ff6b6b,#a0d2db,#d7bde2,#f0f0f0,#ffc3a0,#7fd8be,#ff9a8b,#faf3e0,#fff176", "#000000", "#ffffff", "#cde498", "#a6cf47", "#C8E6C9,#DCEDC8,#FFE0B2,#FFF9C4,#D7CCC8", "#dc3545", "#ffffff", "#8B4513", "#321b67"},
     {"nord", "#eceff4", "#2e3440", "#4c566a", "#3b4252", "#88c0d0", "#81a1c1"},
     {"dracula", "#f8f8f2", "#282a36", "#44475a", "#343746", "#bd93f9", "#6272a4"},
     {"solarized-light", "#586e75", "#fdf6e3", "#d3cbb7", "#eee8d5", "#268bd2", "#93a1a1"},
@@ -453,7 +602,25 @@ bool apply_theme(const std::string& name, Options& o) {
         o.surface = p.surface;
         o.accent = p.accent;
         o.line = p.line;
-        o.muted.clear();
+        o.domains = p.domains;
+        o.evolution = p.evolution;
+        o.cliff = p.cliff;
+        o.label_color = p.label_color;
+        o.component_fill = p.component_fill;
+        o.arrow = p.arrow;
+        o.group_fill = p.group_fill;
+        o.group_header = p.group_header;
+        o.label_fill = p.label_fill;
+        o.note_fill = p.note_fill;
+        o.note_border = p.note_border;
+        o.note_text = p.note_text;
+        o.scale = p.scale;
+        o.scale_stroke = p.scale_stroke;
+        o.plot = p.plot;
+        o.muted = p.muted;
+        o.composite_fill = p.composite_fill;
+        o.composite_header = p.composite_header;
+        o.actor_border = p.actor_border;
         return true;
     }
     return false;

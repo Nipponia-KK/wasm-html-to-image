@@ -207,6 +207,9 @@ void ResourceManager::add(const std::string& url, const uint8_t* data, size_t si
 
     } else if (type == ResourceType::Image) {
         m_context.loadImageFromData(url.c_str(), data, size, url.c_str());
+        // An SVG that refers to external images: fetch them like the page's own.
+        for (const auto& ref : m_context.svgImageUrls) request(ref, ref, ResourceType::Image, true);
+        m_context.svgImageUrls.clear();
     } else if (type == ResourceType::Css) {
         if (looks_like_font_url(url)) {
             // This is actually a font file that was requested as CSS (likely due to <link

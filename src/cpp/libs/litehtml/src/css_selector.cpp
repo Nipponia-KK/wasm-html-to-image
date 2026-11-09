@@ -550,6 +550,19 @@ css_attribute_selector parse_pseudo_element(const css_token_vector& tokens, int&
         return {select_pseudo_element, c.ident()};
     }
 
+    if (c.type == CV_FUNCTION && lowcase(c.name) == "part")  // ::part(<ident>)
+    {
+        // The argument is a single identifier (the part name); anything else
+        // (a list, a complex selector) is not a valid ::part().
+        string arg = get_repr(c.value);
+        if (arg.empty() || arg.find(' ') != string::npos) return {};
+
+        index += 3;
+        css_attribute_selector sel{select_pseudo_element, "part"};
+        sel.value = arg;
+        return sel;
+    }
+
     return {};
 }
 

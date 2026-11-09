@@ -21,6 +21,7 @@ namespace litehtml
 	public:
 		typedef shared_ptr<html_tag>	ptr;
 	protected:
+		std::shared_ptr<css_properties> m_text_css; // see text_css()
 		string_id				m_tag;
 		string_id				m_id;
 		string_vector			m_str_classes;
@@ -48,6 +49,7 @@ namespace litehtml
 		const string_vector& str_classes() const { return m_str_classes; }
 
 		void				set_attr(const char* name, const char* val) override;
+		void				remove_attr(const char* name);
 		const char*			get_attr(const char* name, const char* def = nullptr) const override;
 		void				apply_stylesheet(const litehtml::css& stylesheet) override;
 		void				refresh_styles() override;
@@ -68,6 +70,8 @@ namespace litehtml
 		bool				set_class(const char* pclass, bool add) override;
 		bool				is_replaced() const override;
 		void				compute_styles(bool recursive = true) override;
+		std::shared_ptr<css_properties> text_css() override;
+		const style&		cascaded_style() const { return m_style; }
 		void				apply_word_break() override;
 		void				draw(uint_ptr hdc, pixel_t x, pixel_t y, const position *clip, const std::shared_ptr<render_item> &ri) override;
 		void				draw_background(uint_ptr hdc, pixel_t x, pixel_t y, const position *clip,

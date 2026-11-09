@@ -126,14 +126,15 @@ DecodeResult ImageDecoder::decode(const uint8_t* data, size_t size, sk_sp<SkFont
 
 sk_sp<SkImage> ImageDecoder::decode_first(const uint8_t* data, size_t size, int& out_width,
                                           int& out_height, sk_sp<SkFontMgr> font_mgr,
-                                          bool* out_ratio_only) {
+                                          bool* out_ratio_only, bool* out_no_ratio,
+                                          const SvgBuilderConfig& configure_svg) {
     DecodeResult result;
     if (is_likely_svg(data, size)) {
         // The layout path rasterizes a ratio-only SVG at its default object
         // size (see decode_svg); decode() keeps the shared 512 fallback that
         // the standalone converter's output size relies on.
         auto sk_data = SkData::MakeWithCopy(data, size);
-        result = decode_svg(patch_svg_data(sk_data), std::move(font_mgr), true);
+        result = decode_svg(patch_svg_data(sk_data), std::move(font_mgr), true, configure_svg);
     } else {
         result = decode(data, size, std::move(font_mgr));
     }
@@ -141,6 +142,7 @@ sk_sp<SkImage> ImageDecoder::decode_first(const uint8_t* data, size_t size, int&
     out_width = result.frames[0].bitmap.width();
     out_height = result.frames[0].bitmap.height();
     if (out_ratio_only) *out_ratio_only = result.ratio_only;
+    if (out_no_ratio) *out_no_ratio = result.no_ratio;
     return result.frames[0].bitmap.asImage();
 }
 
@@ -236,16 +238,18 @@ bool ImageDecoder::decode_jxl(const uint8_t* data, size_t size, DecodeResult& re
 #endif
 
 DecodeResult ImageDecoder::decode_svg(const sk_sp<SkData>& data, sk_sp<SkFontMgr> font_mgr,
-                                      bool default_object_raster) {
+                                      bool default_object_raster,
+                                      const SvgBuilderConfig& configure_svg) {
     DecodeResult result;
     SkMemoryStream stream(data);
     auto resource_provider = skresources::DataURIResourceProviderProxy::Make(
         nullptr, skresources::ImageDecodeStrategy::kLazyDecode);
 
-    auto svg_dom = SkSVGDOM::Builder()
-                       .setResourceProvider(std::move(resource_provider))
-                       .setFontManager(font_mgr ? font_mgr : SkFontMgr::RefEmpty())
-                       .make(stream);
+    SkSVGDOM::Builder builder;
+    builder.setResourceProvider(std::move(resource_provider))
+        .setFontManager(font_mgr ? font_mgr : SkFontMgr::RefEmpty());
+    if (configure_svg) configure_svg(builder);
+    auto svg_dom = builder.make(stream);
     if (!svg_dom) return result;
 
     // A viewBox but no absolute width/height on the root: the SVG has an
@@ -269,6 +273,7 @@ DecodeResult ImageDecoder::decode_svg(const sk_sp<SkData>& data, sk_sp<SkFontMgr
         }
     }
     result.ratio_only = ratio_only;
+    result.no_ratio = !abs_w && !abs_h && vb_w == 0;
 
     auto container_size = svg_dom->containerSize();
     if (ratio_only && default_object_raster) {
@@ -300,6 +305,12 @@ DecodeResult ImageDecoder::decode_svg(const sk_sp<SkData>& data, sk_sp<SkFontMgr
             float w = vb_h > 0 ? abs_h * vb_w / vb_h : 300.0f;
             container_size = SkSize::Make(std::max(1.0f, (float)std::lround(w)), abs_h);
         }
+    } else if (default_object_raster && !abs_w && !abs_h && vb_w == 0) {
+        // No intrinsic size and no ratio (no absolute dimensions, no
+        // viewBox): the layout size is the CSS default object size
+        // (300x150), where Skia's empty containerSize() used to fall to
+        // the 512x512 raster fallback below.
+        container_size = SkSize::Make(300, 150);
     } else if (container_size.isEmpty()) {
         container_size = SkSize::Make(512, 512);  // satoru/converter 共通のフォールバック
     }

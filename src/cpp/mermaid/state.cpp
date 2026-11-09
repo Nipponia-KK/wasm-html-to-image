@@ -4,6 +4,7 @@
 #include <cmath>
 #include <map>
 
+#include "mermaid/frame_clear.h"
 #include "mermaid/layered.h"
 #include "mermaid/nodestyle.h"
 
@@ -12,11 +13,12 @@ namespace {
 
 using litehtml::svgutil::trim;
 
-enum class Kind { State, Start, End, Choice, Fork };
+enum class Kind { State, Start, End, Choice, Fork, Note };
 
 struct Node {
     std::string name;
     std::vector<std::string> desc;
+    bool named = false;  // declared with a quoted name (`state "Name" as id`), so the name is a label line
     Kind kind = Kind::State;
     int group = -1;
     double w = 0, h = 0;
@@ -26,11 +28,13 @@ struct Node {
 struct Group {
     std::string title;
     int parent = -1;
+    bool desc_title = false;  // the title is the bare id, so an `id : description` line may replace it
 };
 
 struct Edge {
     int from, to;  // node index, or -(group + 2) for a composite state
     std::string label;
+    bool note = false;  // the dotted link between a note and its state
 };
 
 struct Doc {
@@ -39,6 +43,8 @@ struct Doc {
     std::vector<Edge> edges;
     std::map<std::string, int> index;      // key -> node
     std::map<std::string, int> composite;  // id -> group
+    std::map<std::string, std::string> comp_desc;  // composite id -> the description an `id : ...` line gave it
+    std::map<std::string, int> group_index;        // composite id -> the group once its block is parsed
     Direction dir = Direction::TD;
     StyleSheet sheet;
 };
@@ -71,9 +77,28 @@ int node_for(Doc& d, const std::string& raw, int scope, bool as_target) {
 
 bool starts(const std::string& s, const char* p) { return s.compare(0, std::char_traits<char>::length(p), p) == 0; }
 
+/// A note beside a state: a node of its own, joined to the state by a dotted link (the note comes after the state for `right of`, before for `left of`).
+void add_note(Doc& d, const std::string& target, bool left, int scope, const std::string& text) {
+    if (target.empty() || text.empty()) return;
+    int t = node_for(d, target, scope, false);
+    Node n;
+    n.kind = Kind::Note;
+    n.name = text;
+    n.group = t >= 0 ? d.nodes[t].group : scope;
+    d.nodes.push_back(n);
+    int at = (int)d.nodes.size() - 1;
+    Edge e;
+    e.from = left ? at : t;
+    e.to = left ? t : at;
+    e.note = true;
+    d.edges.push_back(e);
+}
+
 bool parse(const std::string& source, Doc& d, std::string& error) {
     std::vector<int> scopes;
-    bool first = true, in_note = false;
+    bool first = true, in_note = false, note_left = false;
+    std::string note_target, note_text;
+    int note_scope = -1;
     // composite states can be named by transitions before their block, so register them up front
     {
         int count = 0;
@@ -102,12 +127,29 @@ bool parse(const std::string& source, Doc& d, std::string& error) {
             continue;
         }
         if (in_note) {
-            if (line == "end note") in_note = false;
+            if (line == "end note") {
+                in_note = false;
+                add_note(d, note_target, note_left, note_scope, note_text);
+            } else {
+                note_text += (note_text.empty() ? "" : "\n") + line;
+            }
             continue;
         }
         int scope = scopes.empty() ? -1 : scopes.back();
-        if (starts(line, "note ")) {
-            if (line.find(':') == std::string::npos) in_note = true;
+        if (starts(line, "note ")) {  // `note right of A : text`, or a block that runs to `end note`
+            std::string rest = trim(line.substr(5));
+            bool left = starts(rest, "left of ");
+            if (left || starts(rest, "right of ")) {
+                rest = trim(rest.substr(left ? 8 : 9));
+                size_t colon = rest.find(':');
+                note_target = trim(colon == std::string::npos ? rest : rest.substr(0, colon));
+                note_left = left;
+                note_scope = scope;
+                if (colon != std::string::npos) add_note(d, note_target, left, scope, trim(rest.substr(colon + 1)));
+                else in_note = true, note_text.clear();
+            } else if (line.find(':') == std::string::npos) {
+                in_note = true, note_text.clear(), note_target.clear();
+            }
             continue;
         }
         if (starts(line, "direction ")) {
@@ -152,20 +194,31 @@ bool parse(const std::string& source, Doc& d, std::string& error) {
             if (open) {
                 Group g;
                 g.title = name.empty() ? id : name;
+                g.desc_title = name.empty();
+                if (g.desc_title) {  // an `id : description` line before the block names it already
+                    auto it = d.comp_desc.find(id);
+                    if (it != d.comp_desc.end()) g.title = it->second;
+                }
                 g.parent = scope;
                 d.groups.push_back(g);
                 d.composite[id] = (int)d.groups.size() - 1;
+                d.group_index[id] = (int)d.groups.size() - 1;
                 scopes.push_back((int)d.groups.size() - 1);
             } else {
                 int n = node_for(d, id, scope, false);
                 if (n >= 0) {
-                    if (!name.empty()) d.nodes[n].name = name;
+                    if (!name.empty()) d.nodes[n].name = name, d.nodes[n].named = true;
                     d.nodes[n].kind = kind;
                 }
             }
             continue;
         }
         size_t arrow = line.find("-->");
+        size_t first_colon = line.find(':');
+        // `A: a --> b` describes A; a transition has its arrow before any colon (`A:::cls --> B` is a class mark, not a colon)
+        if (arrow != std::string::npos && first_colon != std::string::npos && first_colon < arrow && line.compare(first_colon, 3, ":::") != 0 &&
+            trim(line.substr(0, first_colon)).find(' ') == std::string::npos)
+            arrow = std::string::npos;
         if (arrow != std::string::npos) {
             std::string right = line.substr(arrow + 3), label;
             size_t colon = right.find(':');
@@ -187,8 +240,16 @@ bool parse(const std::string& source, Doc& d, std::string& error) {
         }
         size_t colon = line.find(':');
         if (colon != std::string::npos) {  // `id : description`
+            std::string id = strip_class(trim(line.substr(0, colon)));
+            std::string desc = trim(line.substr(colon + 1));
             int n = node_for(d, line.substr(0, colon), scope, false);
-            if (n >= 0) d.nodes[n].desc.push_back(trim(line.substr(colon + 1)));
+            if (n >= 0) {
+                d.nodes[n].desc.push_back(desc);
+            } else {  // a composite state: the description is its heading, as Mermaid draws it
+                d.comp_desc[id] = desc;
+                auto gi = d.group_index.find(id);
+                if (gi != d.group_index.end() && d.groups[gi->second].desc_title) d.groups[gi->second].title = desc;
+            }
             continue;
         }
         node_for(d, line, scope, false);  // a bare state id
@@ -211,7 +272,7 @@ int resolve(const Doc& d, int ref) {
     if (ref >= 0) return ref;
     int g = -ref - 2, any = -1;
     for (size_t k = 0; k < d.nodes.size(); k++) {
-        if (!inside(d, d.nodes[k].group, g)) continue;
+        if (!inside(d, d.nodes[k].group, g) || d.nodes[k].kind == Kind::Note) continue;
         if (d.nodes[k].kind == Kind::Start && d.nodes[k].group == g) return (int)k;
         if (any < 0) any = (int)k;
     }
@@ -261,14 +322,23 @@ bool render_state(const std::string& source, const Options& options, std::string
             case Kind::End: n.w = n.h = 20; break;
             case Kind::Choice: n.w = n.h = 26; break;
             case Kind::Fork: n.w = horizontal ? 6 : 60, n.h = horizontal ? 60 : 6; break;
+            case Kind::Note: {
+                n.title_lines = wrap_lines(text, split_lines(n.name), kEdgeFont, 400, kWrapWidth);
+                n.w = std::max(40.0, text.block_width(n.title_lines, kEdgeFont, 400) + 20);
+                n.h = n.title_lines.size() * dlh + 16;
+                break;
+            }
             case Kind::State: {
-                n.title_lines = split_lines(n.name);
+                // the label: a quoted name first, then each `id : description` line; a bare id labels itself only when it has neither
+                std::vector<std::string> label;
+                if (n.named) label.push_back(n.name);
+                for (auto& s : n.desc)
+                    if (!s.empty()) label.push_back(s);
+                if (label.empty()) label.push_back(n.name);
+                n.title_lines = wrap_lines(text, label, kNodeFont, kNodeWeight, kWrapWidth);
+                n.desc.clear();  // consumed into the label; there is no separate description section
                 double w = text.block_width(n.title_lines, kNodeFont, kNodeWeight);
                 double h = n.title_lines.size() * lh;
-                if (!n.desc.empty()) {
-                    w = std::max(w, text.block_width(n.desc, kEdgeFont, 400));
-                    h += 10 + n.desc.size() * dlh;
-                }
                 n.w = std::max(60.0, w + 2 * kPadX);
                 n.h = h + 2 * kPadY;
                 break;
@@ -285,14 +355,61 @@ bool render_state(const std::string& source, const Options& options, std::string
         le[k].from = d.edges[k].from;
         le[k].to = d.edges[k].to;
         if (!d.edges[k].label.empty()) {
-            label_lines[k] = split_lines(d.edges[k].label);
+            label_lines[k] = wrap_lines(text, split_lines(d.edges[k].label), kEdgeFont, kEdgeWeight, kWrapWidth);
             le[k].label_w = text.block_width(label_lines[k], kEdgeFont, kEdgeWeight) + 16;
             le[k].label_h = label_lines[k].size() * kEdgeFont * kLineHeight + 16;
         }
     }
     std::vector<int> group_parent;
-    for (const Group& gr : d.groups) group_parent.push_back(gr.parent);
-    LayoutResult lay = layout_layered(ln, le, d.dir, group_parent);
+    std::vector<double> group_min_w;  // a frame is wide enough for its title
+    for (const Group& gr : d.groups) {
+        group_parent.push_back(gr.parent);
+        group_min_w.push_back(std::ceil(text.width(gr.title, kGroupFont, kGroupWeight)) + 24 + 4);
+    }
+    LayoutResult lay;
+    if (horizontal) {
+        lay = layout_layered(ln, le, d.dir, group_parent, group_min_w);
+    } else {
+        // top-down: the layout leaves the notes out, and each one is set beside its state afterwards (not a rank above or below it)
+        std::vector<int> lmap(d.nodes.size(), -1), emap(d.edges.size(), -1);
+        std::vector<LayoutNode> cn;
+        std::vector<LayoutEdge> ce;
+        for (size_t k = 0; k < d.nodes.size(); k++)
+            if (d.nodes[k].kind != Kind::Note) lmap[k] = (int)cn.size(), cn.push_back(ln[k]);
+        for (size_t k = 0; k < d.edges.size(); k++) {
+            if (d.edges[k].note) continue;
+            LayoutEdge e = le[k];
+            e.from = lmap[e.from];
+            e.to = lmap[e.to];
+            emap[k] = (int)ce.size();
+            ce.push_back(e);
+        }
+        LayoutResult core = layout_layered(cn, ce, d.dir, group_parent, group_min_w);
+        lay.width = core.width;
+        lay.height = core.height;
+        lay.center.assign(d.nodes.size(), Pt{0, 0});
+        lay.points.assign(d.edges.size(), {});
+        lay.label_center.assign(d.edges.size(), Pt{0, 0});
+        for (size_t k = 0; k < d.nodes.size(); k++)
+            if (lmap[k] >= 0) lay.center[k] = core.center[lmap[k]];
+        for (size_t k = 0; k < d.edges.size(); k++)
+            if (emap[k] >= 0) lay.points[k] = core.points[emap[k]], lay.label_center[k] = core.label_center[emap[k]];
+        constexpr double kNoteGap = 28;
+        std::map<int, double> stacked;  // per state and side: the height of the notes already set there
+        for (size_t k = 0; k < d.edges.size(); k++) {
+            if (!d.edges[k].note) continue;
+            const bool left = d.nodes[d.edges[k].from].kind == Kind::Note;
+            const int ni = left ? d.edges[k].from : d.edges[k].to, ti = left ? d.edges[k].to : d.edges[k].from;
+            const Node &note = d.nodes[ni], &st = d.nodes[ti];
+            double& used = stacked[ti * 2 + (left ? 1 : 0)];
+            const double cy = lay.center[ti].y + used, tx = lay.center[ti].x;
+            const double cx = tx + (left ? -1 : 1) * (st.w / 2 + kNoteGap + note.w / 2);
+            used += note.h + 8;
+            lay.center[ni] = Pt{cx, cy};
+            if (left) lay.points[k] = {Pt{cx + note.w / 2, cy}, Pt{tx - st.w / 2, cy}};
+            else lay.points[k] = {Pt{tx + st.w / 2, cy}, Pt{cx - note.w / 2, cy}};
+        }
+    }
 
     // composite state frames, children first so a parent covers them
     struct Frame {
@@ -313,11 +430,16 @@ bool render_state(const std::string& source, const Options& options, std::string
         if (!frames[gi].used) continue;
         Frame& f = frames[gi];
         f = {f.x0 - kFramePad, f.y0 - kFramePad - kHeader, f.x1 + kFramePad, f.y1 + kFramePad, true};
+        f.x1 = std::max(f.x1, f.x0 + group_min_w[gi]);  // wide enough for its title; the layout left the room
         if (d.groups[gi].parent >= 0) grow(frames[d.groups[gi].parent], f.x0, f.y0, f.x1, f.y1);
     }
     double x0 = 0, y0 = 0, x1 = lay.width, y1 = lay.height;
     for (const Frame& f : frames)
         if (f.used) x0 = std::min(x0, f.x0), y0 = std::min(y0, f.y0), x1 = std::max(x1, f.x1), y1 = std::max(y1, f.y1);
+    for (size_t k = 0; k < d.nodes.size(); k++)  // notes set beside their states may reach past the layout's box
+        if (d.nodes[k].kind == Kind::Note)
+            x0 = std::min(x0, lay.center[k].x - d.nodes[k].w / 2), y0 = std::min(y0, lay.center[k].y - d.nodes[k].h / 2),
+            x1 = std::max(x1, lay.center[k].x + d.nodes[k].w / 2), y1 = std::max(y1, lay.center[k].y + d.nodes[k].h / 2);
     const double ox = kMargin - x0, oy = kMargin - y0;
     auto at = [&](Pt p) { return Pt{p.x + ox, p.y + oy}; };
 
@@ -326,12 +448,15 @@ bool render_state(const std::string& source, const Options& options, std::string
         const Frame& f = frames[gi];
         if (!f.used) continue;
         body += "<g class=\"composite\">\n<rect x=\"" + num(f.x0 + ox) + "\" y=\"" + num(f.y0 + oy) + "\" width=\"" + num(f.x1 - f.x0) + "\" height=\"" + num(f.y1 - f.y0) +
-                "\" rx=\"5\" ry=\"5\" fill=\"" + th.group_fill + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+                "\" rx=\"5\" ry=\"5\" fill=\"" + th.composite_fill + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        if (!th.composite_header.empty())
+            body += "<rect x=\"" + num(f.x0 + ox) + "\" y=\"" + num(f.y0 + oy) + "\" width=\"" + num(f.x1 - f.x0) + "\" height=\"" + num(kHeader) + "\" rx=\"5\" ry=\"5\" fill=\"" + th.composite_header + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
         body += "<text x=\"" + num(f.x0 + ox + 12) + "\" y=\"" + num(f.y0 + oy + kHeader / 2 + kGroupFont * 0.35) + "\" font-size=\"" + num(kGroupFont) + "\" font-weight=\"" +
                 std::to_string(kGroupWeight) + "\" font-family=\"" + esc(th.font) + "\" fill=\"" + th.text + "\">" + esc(d.groups[gi].title) + "</text>\n";
         body += "<line x1=\"" + num(f.x0 + ox) + "\" y1=\"" + num(f.y0 + oy + kHeader) + "\" x2=\"" + num(f.x1 + ox) + "\" y2=\"" + num(f.y0 + oy + kHeader) + "\" stroke=\"" + th.border +
                 "\" stroke-width=\"1\"/>\n</g>\n";
     }
+    clear_frame_borders(lay.points, lay.label_center, le, frames);
     for (size_t k = 0; k < d.edges.size(); k++) {
         if (lay.points[k].size() < 2) continue;
         std::vector<Pt> pts;
@@ -340,6 +465,10 @@ bool render_state(const std::string& source, const Options& options, std::string
             pts.push_back(at(p));
             list += (list.empty() ? "" : " ") + num(pts.back().x) + "," + num(pts.back().y);
         }
+        if (d.edges[k].note) {  // a note's link: dotted, no arrow head
+            body += "<polyline class=\"edge note-link\" points=\"" + list + "\" fill=\"none\" stroke=\"" + th.note_border + "\" stroke-width=\"1\" stroke-dasharray=\"3 3\" stroke-linejoin=\"round\"/>\n";
+            continue;
+        }
         body += "<polyline class=\"edge\" points=\"" + list + "\" fill=\"none\" stroke=\"" + th.line + "\" stroke-width=\"1\" stroke-linejoin=\"round\"/>\n";
         draw_arrow(body, pts.back(), pts[pts.size() - 2], th.arrow);
     }
@@ -347,7 +476,7 @@ bool render_state(const std::string& source, const Options& options, std::string
         if (label_lines[k].empty()) continue;
         Pt c = at(lay.label_center[k]);
         body += "<g class=\"edge-label\">\n<rect x=\"" + num(c.x - le[k].label_w / 2) + "\" y=\"" + num(c.y - le[k].label_h / 2) + "\" width=\"" + num(le[k].label_w) + "\" height=\"" +
-                num(le[k].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.bg + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\"/>\n";
+                num(le[k].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.label_bg + "\" stroke=\"" + th.label_stroke + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, label_lines[k], c.x, c.y, kEdgeFont, kEdgeWeight, th.text_sec);
         body += "</g>\n";
     }
@@ -369,6 +498,11 @@ bool render_state(const std::string& source, const Options& options, std::string
                 break;
             case Kind::Fork:
                 body += "<rect x=\"" + num(c.x - n.w / 2) + "\" y=\"" + num(c.y - n.h / 2) + "\" width=\"" + num(n.w) + "\" height=\"" + num(n.h) + "\" rx=\"2\" fill=\"" + th.text + "\"/>\n";
+                break;
+            case Kind::Note:
+                body += "<rect x=\"" + num(c.x - n.w / 2) + "\" y=\"" + num(c.y - n.h / 2) + "\" width=\"" + num(n.w) + "\" height=\"" + num(n.h) + "\" rx=\"2\" ry=\"2\" fill=\"" +
+                        th.note_fill + "\" stroke=\"" + th.note_border + "\" stroke-width=\"1\"/>\n";
+                centered_text(body, th, n.title_lines, c.x, c.y, kEdgeFont, 400, th.note_text);
                 break;
             case Kind::State: {
                 body += "<rect x=\"" + num(c.x - n.w / 2) + "\" y=\"" + num(c.y - n.h / 2) + "\" width=\"" + num(n.w) + "\" height=\"" + num(n.h) + "\" rx=\"6\" ry=\"6\"" +

@@ -14,6 +14,7 @@ using litehtml::svgutil::trim;
 struct Item {
     std::string name, stereotype;
     std::vector<std::pair<std::string, std::string>> fields;  // label, value
+    std::vector<std::string> rows;  // the fields as drawn, a long one broken over several rows
     double w = 0, h = 0, head_h = 0;
 };
 
@@ -67,7 +68,7 @@ bool render_requirement(const std::string& source, const Options& options, std::
                 return false;
             }
             std::string key = trim(line.substr(0, colon)), value = unquote(line.substr(colon + 1));
-            std::string label = key == "verifymethod" ? "Verification" : key == "docref" ? "Doc Ref" : key == "id" ? "Id" : capitalise(key);
+            std::string label = key == "verifymethod" ? "Verification" : key == "docref" ? "Doc Ref" : key == "id" ? "ID" : capitalise(key);
             items[open].fields.push_back({label, capitalise(key == "risk" || key == "verifymethod" ? value : value)});
             if (key == "text" || key == "id" || key == "type" || key == "docref") items[open].fields.back().second = value;
             continue;
@@ -110,8 +111,28 @@ bool render_requirement(const std::string& source, const Options& options, std::
             }
             rels.push_back({index[a], index[b], kind});
         } else {
-            error = "unrecognised line: " + line;
-            return false;
+            // without spaces: `a-kind->b` or `b<-kind-a`
+            size_t fa = line.find("->"), fd = line.find('-'), ba = line.find("<-");
+            std::string a, b, kind;
+            if (fa != std::string::npos && fd != std::string::npos && fd < fa && (ba == std::string::npos || ba > fd)) {
+                a = trim(line.substr(0, fd));
+                kind = trim(line.substr(fd + 1, fa - fd - 1));
+                b = trim(line.substr(fa + 2));
+            } else if (ba != std::string::npos && line.find('-', ba + 2) != std::string::npos) {
+                size_t dash = line.find('-', ba + 2);
+                b = trim(line.substr(0, ba));
+                kind = trim(line.substr(ba + 2, dash - ba - 2));
+                a = trim(line.substr(dash + 1));
+            }
+            if (a.empty() || b.empty() || kind.empty()) {
+                error = "unrecognised line: " + line;
+                return false;
+            }
+            if (!index.count(a) || !index.count(b)) {
+                error = "unknown item in: " + line;
+                return false;
+            }
+            rels.push_back({index[a], index[b], kind});
         }
     }
     if (open >= 0) {
@@ -130,10 +151,13 @@ bool render_requirement(const std::string& source, const Options& options, std::
     for (size_t k = 0; k < items.size(); k++) {
         Item& it = items[k];
         double w = std::max(text.width(it.name, 13, 600), text.width(it.stereotype, 11, 400));
-        for (auto& f : it.fields) w = std::max(w, text.width(f.first + ": " + f.second, 12, 400));
+        // a long field (a requirement's text) breaks over rows instead of making the box as wide as the sentence
+        for (auto& f : it.fields)
+            for (const std::string& row : wrap_lines(text, {f.first + ": " + f.second}, 12, 400, kWrapWidth)) it.rows.push_back(row);
+        for (const std::string& row : it.rows) w = std::max(w, text.width(row, 12, 400));
         it.w = std::max(150.0, w + 2 * kPad);
         it.head_h = kHead;
-        it.h = kHead + (it.fields.empty() ? 8 : it.fields.size() * kRow + 12);
+        it.h = kHead + (it.rows.empty() ? 8 : it.rows.size() * kRow + 12);
         ln[k].w = it.w;
         ln[k].h = it.h;
     }
@@ -171,7 +195,7 @@ bool render_requirement(const std::string& source, const Options& options, std::
     for (size_t k = 0; k < rels.size(); k++) {
         Pt c = at(lay.label_center[k]);
         body += "<g class=\"edge-label\">\n<rect x=\"" + num(c.x - le[k].label_w / 2) + "\" y=\"" + num(c.y - le[k].label_h / 2) + "\" width=\"" + num(le[k].label_w) + "\" height=\"" + num(le[k].label_h) +
-                "\" rx=\"2\" fill=\"" + th.bg + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\"/>\n";
+                "\" rx=\"2\" fill=\"" + th.label_bg + "\" stroke=\"" + th.label_stroke + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, {"<<" + rels[k].kind + ">>"}, c.x, c.y, kEdgeFont, kEdgeWeight, th.text_sec);
         body += "</g>\n";
     }
@@ -183,8 +207,8 @@ bool render_requirement(const std::string& source, const Options& options, std::
         body += "<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(it.w) + "\" height=\"" + num(it.head_h) + "\" fill=\"" + th.group_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, {it.stereotype}, p.x, y + 14, 11, 400, th.text_sec);
         centered_text(body, th, {it.name}, p.x, y + 31, 13, 600, th.text);
-        for (size_t f = 0; f < it.fields.size(); f++)
-            aligned_text(body, th, {it.fields[f].first + ": " + it.fields[f].second}, x + kPad, y + it.head_h + 10 + f * kRow + kRow / 2, 12, 400, th.text, "start");
+        for (size_t f = 0; f < it.rows.size(); f++)
+            aligned_text(body, th, {it.rows[f]}, x + kPad, y + it.head_h + 10 + f * kRow + kRow / 2, 12, 400, th.text, "start");
         body += "</g>\n";
     }
     svg = svg_document(th, lay.width + 2 * kMargin, lay.height + 2 * kMargin, body);

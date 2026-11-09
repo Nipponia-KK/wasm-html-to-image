@@ -9,6 +9,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -43,8 +44,24 @@ bool PdfJpegEncoder(SkWStream* dst, const SkPixmap& src, int quality) {
     return dst->write(encoded->data(), encoded->size());
 }
 
-std::string replace_template_vars(std::string html, int pageNum, int totalPages) {
+std::string html_escape_text(const std::string& in) {
+    std::string out;
+    for (char c : in) {
+        if (c == '&') out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else out += c;
+    }
+    return out;
+}
+
+// `{{pageNumber}}` and `{{totalPages}}`, and `{{chapter}}`: the text of
+// the h1 the page shows first (or the last one before it), set by the caller.
+std::string replace_template_vars(std::string html, int pageNum, int totalPages, const std::string& chapter = "") {
     size_t pos;
+    while ((pos = html.find("{{chapter}}")) != std::string::npos) {
+        html.replace(pos, 11, html_escape_text(chapter));
+    }
     std::string pageNumStr = std::to_string(pageNum);
     std::string totalPagesStr = std::to_string(totalPages);
 
@@ -509,6 +526,39 @@ void collect_table_rows(const litehtml::element* table, std::vector<FloatBox>& b
     }
 }
 
+// The h1 elements (the chapters of a book): their text and document-space top, in document order.
+struct ChapterMark {
+    int top = 0;
+    std::string text;
+};
+
+void collect_chapters(const litehtml::element* el, std::vector<ChapterMark>& out) {
+    if (!el) return;
+    const char* tag = el->get_tagName();
+    if (tag && std::strcmp(tag, "h1") == 0) {
+        std::string text;
+        el->get_text(text);
+        size_t b = text.find_first_not_of(" \t\r\n"), e = text.find_last_not_of(" \t\r\n");
+        text = b == std::string::npos ? "" : text.substr(b, e - b + 1);
+        out.push_back({(int)el->get_placement().y, text});
+    }
+    for (const auto& child : el->children()) collect_chapters(child.get(), out);
+}
+
+// The chapter a page's running header names: the first chapter that starts on the page, else the last one before it.
+std::string chapter_for_page(const std::vector<ChapterMark>& marks, int page_top, int page_bottom) {
+    std::string current;
+    for (const auto& m : marks) {
+        if (m.top < page_top) {
+            current = m.text;
+            continue;
+        }
+        if (m.top < page_bottom) return m.text;
+        break;
+    }
+    return current;
+}
+
 // Header groups of every table that carry a display:table-header-group (or a
 // <thead> tag, which the engine maps to a row group by default). The band is the
 // union of the header rows' rects, in document coordinates.
@@ -639,11 +689,58 @@ int snap_cut_to_content(int cut, int pos, const std::vector<LineGroup>& groups,
 // the document bottom of the table whose header repeats: the continuation page
 // offsets only that table's slice by the header height, so the band it may paint
 // in ends there (INT_MAX: no repeated header / table).
+// ---- Footnotes at the foot of the page ------------------------------------------------------------
+//
+// An element carrying data-pdf-footnotes holds the footnote bodies (<li id>), after the content. It is
+// not printed where it lies. A footnote whose first reference (<a href="#id">) falls on a page is
+// painted again at the foot of that page, under a short rule, and the page's content gives up that
+// much height.
+struct NoteItem {
+    std::string id;
+    int top = 0, bottom = 0;
+    int call_top = -1;  // the first reference in the document, -1 when nothing refers to it
+};
+struct NoteZone {
+    int top = INT_MAX;  // where the zone starts: the printed document ends here
+    std::vector<NoteItem> items;
+};
+constexpr int kNoteRule = 14;  // the rule and its gap above the footnotes
+
+void collect_note_items(litehtml::element* el, std::vector<NoteItem>& out) {
+    if (!el) return;
+    const char* id = el->get_attr("id", "");
+    if (el->tag() == litehtml::_li_ && id && id[0] != ' ' && id[0] != 0) {
+        const litehtml::position p = el->get_placement();
+        NoteItem n;
+        n.id = id;
+        n.top = (int)p.y;
+        n.bottom = (int)(p.y + p.height);
+        out.push_back(std::move(n));
+        return;
+    }
+    for (const auto& child : el->children()) collect_note_items(child.get(), out);
+}
+
+bool collect_note_zone(litehtml::element* el, NoteZone& zone) {
+    if (!el) return false;
+    const char* mark = el->get_attr("data-pdf-footnotes", nullptr);
+    if (mark) {
+        zone.top = (int)el->get_placement().y;
+        collect_note_items(el, zone.items);
+        return true;
+    }
+    for (const auto& child : el->children())
+        if (collect_note_zone(child.get(), zone)) return true;
+    return false;
+}
+
 struct PageCut {
     int offset = 0;
     int header_top = -1;
     int header_height = 0;
     int table_bottom = INT_MAX;
+    std::vector<int> notes;  // indexes into the zone's items, painted at the foot of this page
+    int note_height = 0;     // what they take, the rule included
 };
 
 // Plan page-start offsets. With no break-* in the document this reproduces P1's
@@ -657,6 +754,7 @@ std::vector<PageCut> plan_page_cuts(const std::vector<BreakUnit>& units,
                                     const std::vector<LineGroup>& line_groups,
                                     const std::vector<FloatBox>& floats,
                                     const std::vector<RepeatHeader>& repeat_headers,
+                                    const std::vector<NoteItem>& notes,
                                     int area_height, int doc_height) {
     std::vector<PageCut> pages;
     pages.push_back(PageCut{0, -1, 0});
@@ -707,6 +805,9 @@ std::vector<PageCut> plan_page_cuts(const std::vector<BreakUnit>& units,
                 forced = std::min(forced, u.bottom);
         }
 
+        // The cut for a page that may use `limit` (a function of it, because the footnotes of the page
+        // take height from the limit, and which footnotes there are depends on the cut).
+        auto choose = [&](int limit) -> int {
         int cut;
         if (forced <= limit) {
             cut = forced;
@@ -714,9 +815,11 @@ std::vector<PageCut> plan_page_cuts(const std::vector<BreakUnit>& units,
             cut = limit;
 
             // 2) break-inside: avoid — a unit straddling the cut moves down whole.
+            //    A unit taller than a whole page cannot be kept together anywhere, so it is left to
+            //    break (moving it down would only leave the rest of this page, and often a page, empty).
             for (const auto& u : units) {
                 if (u.inside == litehtml::break_inside_avoid && u.top > pos && u.top < cut &&
-                    u.bottom > cut)
+                    u.bottom > cut && u.bottom - u.top <= area_height)
                     cut = std::min(cut, u.top);
             }
 
@@ -745,9 +848,59 @@ std::vector<PageCut> plan_page_cuts(const std::vector<BreakUnit>& units,
             //    With no straddling content this is a no-op, so a document without
             //    fragmentation CSS still cuts exactly as P1/P2 did.
             cut = snap_cut_to_content(cut, pos, line_groups, floats);
-        }
 
+            // 5) The snap can leave a heading alone at the foot of the page: its paragraph did not
+            //    fit its orphan lines and moved down. Apply break-after/before: avoid again, so
+            //    the heading goes with it (a chain of headings moves together).
+            for (int guard = 0; guard < 8; guard++) {
+                bool straddles = false;
+                for (const auto& u : units)
+                    if (u.top < cut && cut < u.bottom) {
+                        straddles = true;
+                        break;
+                    }
+                if (straddles) break;
+                const BreakUnit* a = nullptr;
+                const BreakUnit* b = nullptr;
+                for (const auto& u : units) {
+                    if (u.bottom <= cut && (!a || u.bottom > a->bottom)) a = &u;
+                    if (u.top >= cut && (!b || u.top < b->top)) b = &u;
+                }
+                const bool avoid_between = (a && a->after == litehtml::break_flow_avoid) ||
+                                           (b && b->before == litehtml::break_flow_avoid);
+                if (!avoid_between || !a || a->top <= pos) break;
+                cut = a->top;
+            }
+        }
+        return cut;
+        };
+        int cut = choose(limit);
         if (cut <= pos) cut = limit;  // no forward progress: fall back to the pixel cut
+
+        // Footnotes: the ones first referred to on this page sit at its foot, so the page gives up
+        // their height. Cutting earlier drops references from the page, never adds, so the second
+        // reserve is no larger than the first.
+        if (!notes.empty()) {
+            std::vector<int> ids;
+            auto reserve_for = [&](int end) {
+                ids.clear();
+                int h = 0;
+                for (size_t k = 0; k < notes.size(); k++) {
+                    if (notes[k].call_top < pos || notes[k].call_top >= std::min(end, doc_height)) continue;
+                    ids.push_back((int)k);
+                    h += notes[k].bottom - notes[k].top;
+                }
+                return h > 0 ? h + kNoteRule : 0;
+            };
+            int reserve = reserve_for(cut);
+            if (reserve > 0 && limit - reserve > pos) {
+                int smaller = choose(limit - reserve);
+                if (smaller > pos) cut = smaller;
+                reserve = reserve_for(cut);
+            }
+            pages.back().notes = ids;
+            pages.back().note_height = reserve;
+        }
         if (cut <= pos || cut >= doc_height) break;
         pages.push_back(PageCut{cut, -1, 0});
         pos = cut;
@@ -1321,11 +1474,30 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
     collect_line_groups(doc->root().get(), line_groups, float_boxes);
     std::vector<RepeatHeader> repeat_headers;
     collect_repeat_headers(doc->root().get(), repeat_headers);
+    std::vector<ChapterMark> chapter_marks;
+    collect_chapters(doc->root().get(), chapter_marks);
     std::vector<CloneBox> clone_boxes;
     collect_clone_boxes(doc->root_render(), clone_boxes);
+    // Footnotes at the foot of the page. The zone is not printed where it lies, so the printed document
+    // ends at its top. A footnote too tall for a third of a page cannot sit there: then the zone is
+    // printed as it is, at the end.
+    NoteZone note_zone;
+    if (collect_note_zone(doc->root().get(), note_zone)) {
+        std::vector<LinkBox> calls;
+        collect_link_boxes(doc->root().get(), calls);
+        bool fits = !note_zone.items.empty();
+        for (auto& n : note_zone.items) {
+            for (const auto& c : calls)
+                if (c.target == n.id && c.top < note_zone.top && (n.call_top < 0 || c.top < n.call_top)) n.call_top = c.top;
+            if ((n.bottom - n.top) * 3 > content_area_height) fits = false;
+        }
+        if (!fits) note_zone = NoteZone{};
+    }
+    const bool has_notes = note_zone.top < INT_MAX;
+    const int print_height = has_notes ? std::max(1, std::min(doc_height, note_zone.top)) : doc_height;
     std::vector<PageCut> pages =
-        plan_page_cuts(break_units, line_groups, float_boxes, repeat_headers, content_area_height,
-                       doc_height);
+        plan_page_cuts(break_units, line_groups, float_boxes, repeat_headers, note_zone.items,
+                       content_area_height, print_height);
     int page_count = (int)pages.size();
     if (page_count < 1) page_count = 1;
 
@@ -1408,8 +1580,11 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
 
         // Header / footer: the document is cached per distinct template HTML, so a
         // template without page-number placeholders is laid out once and only re-drawn.
-        if (!options.pdfHeader.empty()) {
-            std::string headerHtml = replace_template_vars(options.pdfHeader, page_num, page_count);
+        // pdfSkipRunning: the first pages (a cover, a contents page) carry no header or footer.
+        if (!options.pdfHeader.empty() && page_num > options.pdfSkipRunning) {
+            const int ch_top = (page < (int)pages.size()) ? pages[page].offset : 0;
+            const int ch_bottom = (page + 1 < (int)pages.size()) ? pages[page + 1].offset : INT_MAX;
+            std::string headerHtml = replace_template_vars(options.pdfHeader, page_num, page_count, chapter_for_page(chapter_marks, ch_top, ch_bottom));
             canvas->save();
             canvas->translate((SkScalar)margin_left, 0);
             header_cache.draw(headerHtml, content_width, margin_top, canvas, context, css.c_str(),
@@ -1417,8 +1592,10 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
             canvas->restore();
         }
 
-        if (!options.pdfFooter.empty()) {
-            std::string footerHtml = replace_template_vars(options.pdfFooter, page_num, page_count);
+        if (!options.pdfFooter.empty() && page_num > options.pdfSkipRunning) {
+            const int ch_top = (page < (int)pages.size()) ? pages[page].offset : 0;
+            const int ch_bottom = (page + 1 < (int)pages.size()) ? pages[page + 1].offset : INT_MAX;
+            std::string footerHtml = replace_template_vars(options.pdfFooter, page_num, page_count, chapter_for_page(chapter_marks, ch_top, ch_bottom));
             canvas->save();
             canvas->translate((SkScalar)margin_left, (SkScalar)(page_height - footer_band));
             footer_cache.draw(footerHtml, content_width, footer_band, canvas, context, css.c_str(),
@@ -1445,6 +1622,11 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
         if (page + 1 < (int)pages.size()) slice_height = pages[page + 1].offset - page_offset;
         if (slice_height < 1) slice_height = 1;
         if (slice_height > avail) slice_height = avail;
+        if (has_notes) {
+            // the footnotes take the foot of the page; the zone they come from is not printed
+            const int note_h = (page < (int)pages.size()) ? pages[page].note_height : 0;
+            slice_height = std::max(1, std::min({slice_height, avail - note_h, print_height - page_offset}));
+        }
 
         // Draw one clip band of the document with a page offset. The bands partition the page
         // (a 2px overlap at the table's closing border aside), so no pixel is painted twice —
@@ -1547,13 +1729,37 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
         // cull would be the wrong test.
         if (header_height > 0 && header_top >= 0) draw_band(0, header_height, header_top, false);
 
+        // Footnotes: a rule and each footnote that this page refers to first, painted again from the zone.
+        std::vector<std::pair<int, int>> note_spots;  // (item, y on the page)
+        if (has_notes && page < (int)pages.size() && pages[page].note_height > 0) {
+            int y = content_area_height - pages[page].note_height;
+            canvas->save();
+            canvas->translate((SkScalar)margin_left, (SkScalar)margin_top);
+            SkPaint rule;
+            rule.setColor(SkColorSetARGB(255, 136, 136, 136));
+            canvas->drawRect(SkRect::MakeXYWH(0, (SkScalar)(y + kNoteRule / 2 - 1), (SkScalar)(content_width / 3), 1), rule);
+            canvas->restore();
+            y += kNoteRule;
+            for (int k : pages[page].notes) {
+                const NoteItem& n = note_zone.items[k];
+                draw_band(y, y + (n.bottom - n.top), n.top - y, false);
+                note_spots.emplace_back(k, y);
+                y += n.bottom - n.top;
+            }
+        }
+
         // Internal links: named destinations at the top of the targeted elements, and a link
         // annotation over every <a href="#id"> box, on the page each starts on. A link to a
         // destination that does not exist is skipped (the viewer would show a dead link).
         {
             const int slice_top = page_offset;
             const int slice_bottom = (page + 1 < (int)pages.size()) ? pages[page + 1].offset : INT_MAX;
+            for (const auto& s : note_spots) {
+                sk_sp<SkData> name = SkData::MakeWithCString(pdf_dest_name(note_zone.items[s.first].id).c_str());
+                SkAnnotateNamedDestination(canvas, SkPoint::Make((SkScalar)margin_left, (SkScalar)(margin_top + s.second)), name.get());
+            }
             for (const auto& d : dest_points) {
+                if (has_notes && d.top >= note_zone.top) continue;  // inside the zone: set where it was painted
                 if (d.top < slice_top || d.top >= slice_bottom) continue;
                 sk_sp<SkData> name = SkData::MakeWithCString(pdf_dest_name(d.name).c_str());
                 SkAnnotateNamedDestination(
@@ -1562,6 +1768,7 @@ static sk_sp<SkData> render_html_to_pdf_impl(const std::string& html, int width,
             }
             for (const auto& l : link_boxes) {
                 if (l.top < slice_top || l.top >= slice_bottom) continue;
+                if (has_notes && l.top >= note_zone.top) continue;
                 bool known = false;
                 for (const auto& d : dest_points) known = known || d.name == l.target;
                 if (!known) continue;

@@ -43,6 +43,13 @@ npx wasm-html-to-image <input> [options]
 | `--no-math` | - | - | Disable KaTeX math typesetting (enabled by default when `katex` is installed) |
 | `--markdown-theme <light\|dark>` | - | `light` | Theme for the built-in Markdown stylesheet |
 | `--markdown-css <path>` | - | None | Path to extra stylesheet appended after the built-in styles |
+| `--mermaid` | - | automatic for `.mmd` / `.mermaid` | Treat the input as a Mermaid diagram (needed for inline text and stdin) |
+| `--mermaid-theme <name>` | - | `light` | Colour theme of the diagram (`light`, `dark`, `neutral`, `forest`, `nord`, `dracula`, `solarized-light`, `solarized-dark`, `rose-pine`, `sepia`) |
+| `--mermaid-mode <mode>` | - | `strict` | How much a broken source is forgiven: `strict`, `compat`, `recover` |
+| `--mermaid-directives` | - | off | Honour `%%{init}%%` and frontmatter `config:` in the source |
+| `--font <path>` | - | None | A local font file or glob (e.g. `'./fonts/*.woff2'`); repeatable. `'Family=path'` registers it under that family name (e.g. `'Segoe UI=C:/Windows/Fonts/segoeui.ttf'`). Repeat a family for each weight and `font-weight` picks the nearest file |
+| `--js` | - | off | Run the page's scripts in QuickJS (WebAssembly) before rendering (nothing extra to install; trusted pages only) |
+| `--js-wait <ms\|selector>` | - | `1000` | With `--js`: milliseconds to wait after `load`, or a CSS selector to wait for |
 
 ## Examples
 

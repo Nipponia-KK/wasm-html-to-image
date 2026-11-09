@@ -280,6 +280,7 @@ class container_skia : public litehtml::document_container {
     virtual void load_image(const char *src, const char *baseurl, bool redraw_on_ready) override;
     virtual void get_image_size(const char *src, const char *baseurl, litehtml::size &sz) override;
     virtual bool get_image_ratio_only(const char *src, const char *baseurl) override;
+    virtual bool get_image_no_ratio(const char *src, const char *baseurl) override;
     virtual void draw_image(
         litehtml::uint_ptr hdc, const litehtml::background_layer &layer, const std::string &url,
         const std::string &base_url, litehtml::object_fit fit = litehtml::object_fit_fill,

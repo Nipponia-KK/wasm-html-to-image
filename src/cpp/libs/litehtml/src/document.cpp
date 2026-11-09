@@ -1,3 +1,6 @@
+#include <unordered_set>
+#include <algorithm>
+#include <chrono>
 #include "html.h"
 #include "document.h"
 #include "stylesheet.h"
@@ -83,7 +86,21 @@ document::ptr document::createFromString(
 
 	if (master_styles != "")
 	{
-		doc->m_master_css.parse_css_stylesheet(master_styles, "", doc, nullptr, nullptr, true, 0);
+		// The master stylesheet is the same text for every document and holds no at-rule (nothing that refers to the document),
+		// and parsing it took most of a small page's time to build. Parse it once and give each document a copy.
+		static thread_local string parsed_text;
+		static thread_local css parsed_css;
+		static thread_local bool have_parsed = false;
+		if (!have_parsed || parsed_text != master_styles)
+		{
+			css fresh;
+			fresh.parse_css_stylesheet(master_styles, "", doc, nullptr, nullptr, true, 0);
+			fresh.sort_selectors();
+			parsed_css = fresh;
+			parsed_text = master_styles;
+			have_parsed = true;
+		}
+		doc->m_master_css = parsed_css;
 		// Quirks mode (no DOCTYPE): tables do not inherit text-align, font and white-space
 		// from their ancestors (WebKit/Blink quirks.css), e.g. <center><table> keeps cells
 		// left-aligned.
@@ -93,8 +110,8 @@ document::ptr document::createFromString(
 				string("table { text-align: left; font-size: medium; line-height: normal;"
 				       " font-weight: normal; font-style: normal; white-space: normal; }"),
 				"", doc, nullptr, nullptr, true, 0);
+			doc->m_master_css.sort_selectors();
 		}
-		doc->m_master_css.sort_selectors();
 	}
 	if (user_styles != "")
 	{
@@ -984,13 +1001,14 @@ pixel_t document::render( pixel_t max_width, render_type rt )
 			// After the first layout, container sizes are known.
 			// We trigger a style refresh and a second layout pass.
 			bool has_cq = m_master_css.has_container_queries() || m_styles.has_container_queries() || m_user_css.has_container_queries();
-			bool has_tables = !m_tabular_elements.empty();
-			if (has_cq || has_tables) {
+			// (tables once forced this second pass too; with it removed 1,084 visual tests and the table pages compared box by box come out the same)
+			if (has_cq) {
 			m_root->refresh_styles();
 			m_root->compute_styles();
 			propagate_body_writing_mode(m_root);
 
 			// Rebuild rendering tree because structure might have changed (e.g. pseudo-elements)
+			drop_render_links();
 			m_root_render = m_root->create_render_item(nullptr);
 			fix_tables_layout();
 			if (m_root_render)
@@ -1034,6 +1052,7 @@ pixel_t document::render( pixel_t max_width, render_type rt )
 				fit(m_root);
 				if (!changed) break;
 				m_root->compute_styles();
+				drop_render_links();
 				m_root_render = m_root->create_render_item(nullptr);
 				fix_tables_layout();
 				if (m_root_render) m_root_render = m_root_render->init();
@@ -1761,6 +1780,307 @@ void document::append_children_from_string(element& parent, const char* str, boo
 	// We have to check the tabular elements for missing table elements
 	// and create the anonymous boxes in visual table layout
 	fix_tables_layout();
+}
+
+// The render items of the tree about to be replaced: every element lists them as weak pointers, and a weak pointer keeps the
+// storage of an item made by make_shared alive after the item is gone. A tree built again and again (live layout, container
+// queries, tables) would otherwise keep every old one.
+void document::drop_render_links()
+{
+	std::function<void(const element::ptr&)> drop = [&](const element::ptr& el)
+	{
+		el->m_renders.clear();
+		for (const auto& c : el->m_children) drop(c);
+	};
+	if (m_root) drop(m_root);
+	m_root_render.reset();
+}
+
+bool document::live_set_attr(const std::shared_ptr<element>& el, const char* name, const char* value)
+{
+	if (!el || !name || el->get_document().get() != this) return false;
+	auto* tag = dynamic_cast<html_tag*>(el.get());
+	if (!tag) return false;
+	if (value) tag->set_attr(name, value);
+	else tag->remove_attr(name);
+	return true;
+}
+
+bool document::live_parse_fragment(const char* html, std::vector<std::shared_ptr<element>>& out)
+{
+	if (!html) return false;
+	GumboOptions opts = kGumboDefaultOptions;
+	opts.fragment_context = GUMBO_TAG_BODY;
+	GumboOutput* output = gumbo_parse_with_options(&opts, html, strlen(html));
+	elements_list parsed;
+	create_node(output->root, parsed, true, false);
+	gumbo_destroy_output(&kGumboDefaultOptions, output);
+	for (const auto& e : parsed) out.push_back(e);
+	return true;
+}
+
+std::vector<std::shared_ptr<element>> document::live_set_children(const std::shared_ptr<element>& parent,
+	const std::vector<std::shared_ptr<element>>& list, const std::vector<std::shared_ptr<element>>& fresh)
+{
+	std::vector<element::ptr> restyle;
+	if (!parent) return restyle;
+	std::unordered_set<const element*> keep;
+	for (const auto& e : list) keep.insert(e.get());
+	std::unordered_set<const element*> fresh_set;
+	for (const auto& e : fresh) fresh_set.insert(e.get());
+	// the ones that stay in place: only a position-dependent selector can restyle them
+	std::vector<element::ptr> stay;
+	for (const auto& e : list)
+		if (e->parent() == parent && !fresh_set.count(e.get())) stay.push_back(e);
+	std::vector<element::ptr> old(parent->m_children.begin(), parent->m_children.end());
+	for (const auto& e : old)
+		if (!keep.count(e.get())) e->parent(nullptr);
+	parent->m_children.clear();
+	for (const auto& e : list)
+	{
+		element::ptr from = e->parent();
+		if (from && from != parent) from->removeChild(e);
+		e->parent(nullptr);
+		parent->appendChild(e);
+		if (fresh_set.count(e.get()) || !(from == parent)) restyle.push_back(e); // new, or moved in from elsewhere
+	}
+	for (const auto& e : fresh) m_live_new.push_back(e);
+	const bool siblings = m_master_css.sibling_sensitive() || m_styles.sibling_sensitive() || m_user_css.sibling_sensitive();
+	const bool structural = m_master_css.structural_sensitive() || m_styles.structural_sensitive() || m_user_css.structural_sensitive();
+	if (siblings)
+	{
+		restyle.clear();
+		restyle.push_back(parent->parent() ? parent->parent() : parent);
+	}
+	else if (structural)
+	{
+		// Positions counted from the start only change for the new elements and the siblings after the first change; counted from
+		// the end (or :empty), or with many siblings behind it, the whole parent is restyled.
+		const bool backward = m_master_css.backward_sensitive() || m_styles.backward_sensitive() || m_user_css.backward_sensitive();
+		size_t first = 0;
+		while (!backward && first < old.size() && first < list.size() && old[first] == list[first]) first++;
+		const size_t behind = list.size() > first ? list.size() - first : 0;
+		if (backward || behind > 48)
+		{
+			restyle.clear();
+			restyle.push_back(parent);
+		}
+		else
+		{
+			std::unordered_set<const element*> have;
+			for (const auto& e : restyle) have.insert(e.get());
+			for (size_t i = first; i < list.size(); i++)
+				if (!have.count(list[i].get())) restyle.push_back(list[i]);
+		}
+	}
+	return restyle;
+}
+
+namespace
+{
+	// Properties whose value never moves a box: a change to only these needs no new layout.
+	bool paint_only_property(string_id name)
+	{
+		switch (name)
+		{
+		case _color_: case _background_color_: case _opacity_: case _cursor_:
+		case _border_color_: case _border_top_color_: case _border_right_color_: case _border_bottom_color_: case _border_left_color_:
+		case _outline_color_: case _text_decoration_color_: case _text_emphasis_color_: case _column_rule_color_:
+		case __webkit_text_fill_color_: case __webkit_text_stroke_color_:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	// Are two cascaded values the same? Only the kinds that are cheap to compare exactly say yes; the rest say no (-> layout).
+	bool same_value(const property_value& a, const property_value& b)
+	{
+		if (a.index() != b.index() || a.m_has_var || b.m_has_var) return false;
+		if (a.is<invalid>() || a.is<inherit>() || a.is<initial>() || a.is<unset>()) return true;
+		if (a.is<int>()) return a.get<int>() == b.get<int>();
+		if (a.is<float>()) return a.get<float>() == b.get<float>();
+		if (a.is<web_color>()) return a.get<web_color>() == b.get<web_color>();
+		if (a.is<string>()) return a.get<string>() == b.get<string>();
+		if (a.is<css_length>()) return a.get<css_length>().to_string() == b.get<css_length>().to_string();
+		return false;
+	}
+
+	struct style_snapshot
+	{
+		std::shared_ptr<element> el;
+		props_map props;
+	};
+
+	// The cascaded styles of a subtree, if it is small enough to be worth comparing.
+	bool snapshot_subtree(const std::shared_ptr<element>& el, std::vector<style_snapshot>& out, size_t limit)
+	{
+		auto tag = std::dynamic_pointer_cast<html_tag>(el);
+		if (tag)
+		{
+			if (out.size() >= limit) return false;
+			out.push_back({el, tag->cascaded_style().properties()});
+		}
+		for (const auto& c : el->children())
+			if (!snapshot_subtree(c, out, limit)) return false;
+		return true;
+	}
+
+	// Did the restyle change nothing but paint-only properties?
+	bool only_paint_changed(const std::vector<style_snapshot>& before, const std::vector<std::shared_ptr<element>>& scopes)
+	{
+		std::vector<style_snapshot> after;
+		for (const auto& s : scopes)
+			if (!snapshot_subtree(s, after, before.size())) return false;
+		if (after.size() != before.size()) return false;
+		for (size_t i = 0; i < before.size(); i++)
+		{
+			if (before[i].el != after[i].el) return false;
+			const props_map& x = before[i].props;
+			const props_map& y = after[i].props;
+			std::vector<bool> matched(y.size(), false);
+			for (const auto& px : x)
+			{
+				bool found = false;
+				for (size_t k = 0; k < y.size(); k++)
+				{
+					if (matched[k] || y[k].first != px.first) continue;
+					matched[k] = true;
+					found = true;
+					if (!same_value(px.second, y[k].second) && !paint_only_property(px.first)) return false;
+					break;
+				}
+				if (!found && !paint_only_property(px.first)) return false;
+			}
+			for (size_t k = 0; k < y.size(); k++)
+				if (!matched[k] && !paint_only_property(y[k].first)) return false;
+		}
+		return true;
+	}
+}
+
+document::live_timing document::live_relayout(const std::vector<std::shared_ptr<element>>& changed, const std::vector<std::shared_ptr<element>>& extra, pixel_t max_width, bool attrs_only)
+{
+	live_timing t;
+	if (!m_root) return t;
+	auto now = []() { return std::chrono::steady_clock::now(); };
+	auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+	{
+		return std::chrono::duration<double, std::milli>(b - a).count();
+	};
+	auto t0 = now();
+	// What a change can reach: the element and its descendants (descendant / child selectors, inheritance); with a selector
+	// that looks at siblings or descendants (+ ~ :has) the whole parent, since a sibling or an ancestor may change too.
+	const bool wide = m_master_css.sibling_sensitive() || m_styles.sibling_sensitive() || m_user_css.sibling_sensitive();
+	std::vector<element::ptr> scopes;
+	std::vector<element::ptr> wanted;
+	for (const auto& el : changed) wanted.push_back(wide && el->parent() ? el->parent() : el);
+	for (const auto& el : extra) wanted.push_back(el);
+	for (const auto& s : wanted)
+	{
+		bool covered = false;
+		for (const auto& other : scopes)
+			for (element::ptr a = s; a; a = a->parent())
+				if (a == other) { covered = true; break; }
+		if (covered) continue;
+		// drop scopes this one covers
+		scopes.erase(std::remove_if(scopes.begin(), scopes.end(), [&](const element::ptr& o)
+		{
+			for (element::ptr a = o; a; a = a->parent()) if (a == s) return true;
+			return false;
+		}), scopes.end());
+		scopes.push_back(s);
+	}
+	std::function<void(const element::ptr&)> clear = [&](const element::ptr& el)
+	{
+		el->m_used_styles.clear();
+		el->reset_style();
+		for (const auto& c : el->m_children) clear(c);
+	};
+	// An attribute change that only touches a small subtree may move nothing: keep the cascade of it to compare.
+	std::vector<style_snapshot> before;
+	bool compare = attrs_only && extra.empty() && !scopes.empty() && m_root_render;
+	if (compare)
+		for (const auto& s : scopes)
+			if (!snapshot_subtree(s, before, 400)) { compare = false; break; }
+	for (const auto& s : scopes) clear(s);
+	auto t1 = now();
+	for (const auto& s : scopes)
+	{
+		s->apply_stylesheet(m_master_css);
+		s->parse_attributes();
+		s->apply_stylesheet(m_styles);
+		s->apply_stylesheet(m_user_css);
+	}
+	auto t2 = now();
+	for (const auto& s : scopes) s->compute_styles();
+	for (const auto& c : m_live_new) c->apply_word_break();
+	m_live_new.clear();
+	auto t3 = now();
+	if (compare && only_paint_changed(before, scopes))
+	{
+		// the boxes are where they were: the render tree and the layout stay as they are
+		t.clear = ms(t0, t1); t.apply = ms(t1, t2); t.compute = ms(t2, t3);
+		t.paint_only = true;
+		return t;
+	}
+	m_tabular_elements.clear();
+	drop_render_links();
+	m_root_render = m_root->create_render_item(nullptr);
+	fix_tables_layout();
+	if (m_root_render) m_root_render = m_root_render->init();
+	auto t4 = now();
+	render(max_width);
+	auto t5 = now();
+	t.clear = ms(t0, t1); t.apply = ms(t1, t2); t.compute = ms(t2, t3); t.tree = ms(t3, t4); t.layout = ms(t4, t5);
+	return t;
+}
+
+document::live_timing document::live_probe(pixel_t max_width, int mode)
+{
+	live_timing t;
+	if (!m_root) return t;
+	auto now = []() { return std::chrono::steady_clock::now(); };
+	auto ms = [](std::chrono::steady_clock::time_point a, std::chrono::steady_clock::time_point b)
+	{
+		return std::chrono::duration<double, std::milli>(b - a).count();
+	};
+	auto t0 = now();
+	if (mode == 0)
+	{
+		std::function<void(const element::ptr&)> clear = [&](const element::ptr& el)
+		{
+			el->m_used_styles.clear();
+			el->reset_style();
+			for (const auto& c : el->m_children) clear(c);
+		};
+		clear(m_root);
+	}
+	auto t1 = now();
+	if (mode == 0)
+	{
+		m_root->apply_stylesheet(m_master_css);
+		m_root->parse_attributes();
+		m_root->apply_stylesheet(m_styles);
+		m_root->apply_stylesheet(m_user_css);
+	}
+	else
+	{
+		m_root->refresh_styles();
+	}
+	auto t2 = now();
+	m_root->compute_styles();
+	auto t3 = now();
+	m_tabular_elements.clear();
+	drop_render_links();
+	m_root_render = m_root->create_render_item(nullptr);
+	fix_tables_layout();
+	if (m_root_render) m_root_render = m_root_render->init();
+	auto t4 = now();
+	render(max_width);
+	auto t5 = now();
+	t.clear = ms(t0, t1); t.apply = ms(t1, t2); t.compute = ms(t2, t3); t.tree = ms(t3, t4); t.layout = ms(t4, t5);
+	return t;
 }
 
 void document::dump(dumper& cout)

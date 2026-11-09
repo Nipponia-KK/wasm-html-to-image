@@ -38,6 +38,7 @@ export type {
   OutputFormat,
   RenderOptions,
   HtmlToImageOptions,
+  LayoutBox,
   RenderResult,
   DiagnosticMessage,
   FontDiagnostic,
@@ -46,7 +47,8 @@ export type {
   ResolveResourceHook,
   ResourceDiagnostic,
 } from "./core.js";
-export { DIAGNOSTIC_CODES, LogLevel } from "./core.js";
+export { DIAGNOSTIC_CODES, LogLevel, isImageInput } from "./core.js";
+export { clearResourceCache } from "./core-resources.js";
 export type {
   HtmlToImageModule,
   EmscriptenModuleArg,
@@ -92,6 +94,6 @@ export async function render(
   return htmlToImage(await getDefaultModule(wasm), options);
 }
 
-export type { MermaidOptions, MermaidTheme, RenderFn } from "./mermaid.js";
-// Mermaid: `renderMermaidWith((options) => render(options, wasm), source, { format: "png" })`
-export { MERMAID_THEMES, mermaidToHtml, renderMermaidWith } from "./mermaid.js";
+export type { MermaidInput, MermaidOptions, MermaidTheme, MermaidWarning, RenderFn, RenderMermaid } from "./mermaid.js";
+// Mermaid: `render({ mermaid: { source: "graph LR; A --> B" }, format: "png" }, wasm)`
+export { MERMAID_THEMES, mermaidToHtml } from "./mermaid.js";

@@ -20,6 +20,7 @@ struct Pt {
 /// Fixed sizes of the drawing (px), the same scale as the reference renderer so diagrams look alike.
 namespace metrics {
 constexpr double kNodeFont = 13;
+constexpr double kWrapWidth = 200;  // a label wider than this wraps (Mermaid's wrappingWidth)
 constexpr int kNodeWeight = 500;
 constexpr double kEdgeFont = 11;
 constexpr int kEdgeWeight = 400;
@@ -38,7 +39,9 @@ constexpr double kMargin = 40;
 /// Colours with every derived value computed (no var() / color-mix() left in the output).
 struct Theme {
     std::string bg, fg, accent, line, muted, surface, border;
-    std::string text, text_sec, text_faint, arrow, group_fill, group_hdr, inner_stroke, key_badge;
+    std::string text, text_sec, text_faint, arrow, group_fill, group_hdr, cluster_hdr, composite_fill, composite_header, actor_border, label_bg, label_stroke, note_fill, note_border, note_text, scale_stroke, inner_stroke, key_badge;
+    std::vector<std::string> scale, plot, domains;  // empty: the diagram derives its own colours
+    std::string evolution, component_fill, cliff, label;
     bool paint_background = false;
     std::string font, mono;
 };
@@ -46,6 +49,21 @@ struct Theme {
 inline std::string mix(const std::string& fg, const std::string& bg, int pct) {
     std::string expr = "color-mix(in srgb, " + fg + " " + std::to_string(pct) + "%, " + bg + ")", out;
     return litehtml::svgutil::eval_color_functions(expr, out) ? out : fg;
+}
+
+inline std::vector<std::string> split_colors(const std::string& list) {
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at <= list.size()) {
+        size_t end = list.find(',', at);
+        if (end == std::string::npos) end = list.size();
+        std::string c = list.substr(at, end - at);
+        while (!c.empty() && c.front() == ' ') c.erase(c.begin());
+        while (!c.empty() && c.back() == ' ') c.pop_back();
+        if (!c.empty()) out.push_back(c);
+        at = end + 1;
+    }
+    return out;
 }
 
 inline Theme make_theme(const Options& o) {
@@ -60,11 +78,28 @@ inline Theme make_theme(const Options& o) {
     t.text = o.fg;
     t.text_sec = o.muted.empty() ? mix(o.fg, o.bg, 60) : o.muted;
     t.text_faint = mix(o.fg, o.bg, 25);
-    t.arrow = t.accent;
-    t.group_fill = o.bg;
+    t.arrow = o.arrow.empty() ? t.accent : o.arrow;
+    t.group_fill = o.group_fill.empty() ? o.bg : o.group_fill;
     t.group_hdr = mix(o.fg, o.bg, 5);
+    t.cluster_hdr = o.group_header.empty() ? t.group_hdr : o.group_header;
+    t.note_fill = o.note_fill.empty() ? t.group_hdr : o.note_fill;
+    t.note_border = o.note_border.empty() ? t.border : o.note_border;
+    t.note_text = o.note_text.empty() ? t.text : o.note_text;
+    t.scale_stroke = o.scale_stroke.empty() ? o.bg : o.scale_stroke;
+    t.scale = split_colors(o.scale);
+    t.plot = split_colors(o.plot);
+    t.domains = split_colors(o.domains);
+    t.label = o.label_color.empty() ? t.text : o.label_color;
+    t.cliff = o.cliff.empty() ? t.line : o.cliff;
+    t.evolution = o.evolution.empty() ? "#d9534f" : o.evolution;
+    t.component_fill = o.component_fill.empty() ? t.bg : o.component_fill;
+    t.label_bg = o.label_fill.empty() ? o.bg : o.label_fill;
+    t.composite_fill = o.composite_fill.empty() ? t.group_fill : o.composite_fill;
+    t.composite_header = o.composite_header;
+    t.actor_border = o.actor_border.empty() ? t.border : o.actor_border;
     t.inner_stroke = mix(o.fg, o.bg, 12);
     t.key_badge = mix(o.fg, o.bg, 10);
+    t.label_stroke = o.label_fill.empty() ? t.inner_stroke : o.label_fill;  // with a label colour of its own, no outline
     t.paint_background = o.paint_background;
     t.font = o.font_family;
     t.mono = o.mono_family;
@@ -78,6 +113,11 @@ inline std::string num(double v) {
     while (!s.empty() && s.back() == '0') s.pop_back();
     if (!s.empty() && s.back() == '.') s.pop_back();
     return s == "-0" ? "0" : s;
+}
+
+/// A dashed straight line. Skia's SVG draws a `<line>` with a dash array as a solid line plus black dashes, so it is a `<path>`.
+inline std::string dashed_line(double x1, double y1, double x2, double y2, const std::string& stroke, double width, const std::string& dash) {
+    return "<path d=\"M" + num(x1) + " " + num(y1) + " L" + num(x2) + " " + num(y2) + "\" fill=\"none\" stroke=\"" + stroke + "\" stroke-width=\"" + num(width) + "\" stroke-dasharray=\"" + dash + "\"/>\n";
 }
 
 inline std::string esc(const std::string& v) {
@@ -135,6 +175,39 @@ struct Text {
         return w;
     }
 };
+
+/// Lines of @p lines broken so that none is wider than @p max_w: at a space when there is one, anywhere otherwise (CJK, a long
+/// word). Mermaid wraps flowchart labels at 200 px too (`wrappingWidth`), so a long label grows the node downward, not sideways.
+inline std::vector<std::string> wrap_lines(const Text& text, const std::vector<std::string>& lines, double size, int weight, double max_w) {
+    std::vector<std::string> out;
+    for (const std::string& s : lines) {
+        if (text.width(s, size, weight) <= max_w) {
+            out.push_back(s);
+            continue;
+        }
+        std::string cur;
+        for (size_t i = 0; i < s.size();) {
+            unsigned char c = (unsigned char)s[i];
+            size_t len = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1;
+            std::string ch = s.substr(i, len);
+            i += len;
+            if (!cur.empty() && text.width(cur + ch, size, weight) > max_w) {
+                size_t sp = len == 1 && ch != " " ? cur.rfind(' ') : std::string::npos;
+                if (sp != std::string::npos) {
+                    out.push_back(cur.substr(0, sp));
+                    cur = cur.substr(sp + 1) + ch;
+                } else {
+                    out.push_back(cur);
+                    cur = ch == " " ? "" : ch;
+                }
+            } else {
+                cur += ch;
+            }
+        }
+        if (!cur.empty()) out.push_back(cur);
+    }
+    return out;
+}
 
 /// Escaped text for a `<text>`.
 inline std::string text_content(const std::string& s) { return esc(s); }

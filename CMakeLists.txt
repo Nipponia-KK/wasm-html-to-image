@@ -101,6 +101,7 @@ target_sources(html_to_image_core PRIVATE
     src/cpp/api/unified_api.cpp
     src/cpp/api/satoru_bindings.cpp
     src/cpp/api/layout_json.cpp
+    src/cpp/api/live_layout.cpp
     src/cpp/api/converter_bindings.cpp
     src/cpp/api/unified_bindings.cpp
     src/cpp/api/js_logger.cpp
@@ -133,6 +134,12 @@ target_sources(html_to_image_core PRIVATE
     src/cpp/mermaid/mindmap.cpp
     src/cpp/mermaid/timeline.cpp
     src/cpp/mermaid/treeview.cpp
+    src/cpp/mermaid/swimlane.cpp
+    src/cpp/mermaid/usecase.cpp
+    src/cpp/mermaid/eventmodeling.cpp
+    src/cpp/mermaid/railroad.cpp
+    src/cpp/mermaid/cynefin.cpp
+    src/cpp/mermaid/wardley.cpp
     src/cpp/mermaid/ishikawa.cpp
     src/cpp/mermaid/venn.cpp
     src/cpp/mermaid/c4.cpp

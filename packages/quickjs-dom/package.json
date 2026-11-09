@@ -1,0 +1,98 @@
+{
+  "name": "wasm-quickjs-dom",
+  "version": "1.0.15",
+  "description": "A small JSDOM for runtimes without Node or eval: QuickJS-ng (WebAssembly) with a DOM written in C, for Cloudflare Workers, Vercel Edge, Deno, Bun and browsers",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "wasm-quickjs-dom": "./dist/bin.js"
+  },
+  "author": "SoraKumo <info@croud.jp>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SoraKumo001/wasm-html-to-image.git",
+    "directory": "packages/quickjs-dom"
+  },
+  "homepage": "https://sorakumo001.github.io/wasm-html-to-image/master/docs/",
+  "bugs": {
+    "url": "https://github.com/SoraKumo001/wasm-html-to-image/issues"
+  },
+  "keywords": [
+    "jsdom",
+    "dom",
+    "quickjs",
+    "wasm",
+    "webassembly",
+    "cloudflare-workers",
+    "edge-runtime"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "imports": {
+    "#quickjs-wasm": {
+      "workerd": "./dist/quickjs-workerd.js",
+      "edge-light": "./dist/quickjs-edge-light.js",
+      "deno": "./dist/quickjs-web.js",
+      "node": "./dist/quickjs-node.js",
+      "bun": "./dist/quickjs-node.js",
+      "default": "./dist/quickjs-web.js"
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build-quickjs.mjs && tsc -b && node scripts/build-edge-js.mjs",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run && jest --config tests/jest/jest.config.cjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./jsdom": {
+      "types": "./dist/jsdom.d.ts",
+      "import": "./dist/jsdom.js",
+      "default": "./dist/jsdom.js"
+    },
+    "./vitest": {
+      "types": "./dist/vitest.d.ts",
+      "import": "./dist/vitest.js",
+      "default": "./dist/vitest.js"
+    },
+    "./jest": "./jest.cjs",
+    "./quickjs.wasm": {
+      "types": "./dist/quickjs-wasm.d.ts",
+      "default": "./dist/quickjs.wasm"
+    }
+  },
+  "files": [
+    "dist",
+    "jest.cjs",
+    "vendor/quickjs/LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "htmlparser2": "10.1.0",
+    "jest": "^30.5.2",
+    "jest-environment-node": "^30.5.2",
+    "jsdom": "^31.0.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "web-streams-polyfill": "4.5.1"
+  }
+}

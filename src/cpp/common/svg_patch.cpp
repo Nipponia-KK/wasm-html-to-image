@@ -154,19 +154,19 @@ sk_sp<SkData> patch_svg_data(const sk_sp<SkData>& data) {
         }
     }
 
-    // Step3 (svg_patch/xlink): data: href→xlink:href + xmlns:xlink 付与
+    // Step3 (svg_patch/xlink): href→xlink:href (data: and external URLs alike) + xmlns:xlink 付与
     // 3. Patch href to xlink:href for embedded images and add xlink namespace if needed
     {
         std::string result;
         std::string_view searchRange = svg;
         bool step_changed = false;
         while (auto m =
-                   ctre::search<"(<image[^>]*?)\\s+href=\"data:([^/]+/[^;]+;base64,[^\"]+)\"">(searchRange)) {
+                   ctre::search<"(<image[^>]*?)\\s+href=\"([^\"]+)\"">(searchRange)) {
             step_changed = true;
             changed = true;
             result.append(searchRange.substr(0, m.get<0>().begin() - searchRange.begin()));
             result.append(m.get<1>().to_view());
-            result.append(" xlink:href=\"data:");
+            result.append(" xlink:href=\"");
             result.append(m.get<2>().to_view());
             result.append("\"");
             searchRange = searchRange.substr(m.get<0>().end() - searchRange.begin());

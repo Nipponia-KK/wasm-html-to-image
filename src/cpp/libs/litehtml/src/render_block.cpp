@@ -236,12 +236,23 @@ std::shared_ptr<litehtml::render_item> litehtml::render_item_block::init()
         decltype(m_children) new_children;
         decltype(m_children) inlines;
         bool not_ws_added = false;
+        // The empty halves left behind when split_inlines() took a block out of an inline
+        // (`<a><div></div></a>`) make no line box in a browser, so the block's margins still
+        // collapse through the parent. Wrapping them in an anonymous block would stop that.
+        const auto is_split_remnant = [](const std::shared_ptr<render_item>& ri) {
+            const auto& css = ri->src_el()->css();
+            return ri->children().empty() && !ri->src_el()->children().empty() &&
+                   css.get_display() == display_inline &&
+                   css.get_padding().left.val() == 0 && css.get_padding().right.val() == 0 &&
+                   css.get_borders().left.width.val() == 0 && css.get_borders().right.width.val() == 0 &&
+                   css.get_margins().left.val() == 0 && css.get_margins().right.val() == 0;
+        };
         for (const auto& el : m_children)
         {
             if(el->src_el()->is_inline())
             {
                 inlines.push_back(el);
-                if(!el->src_el()->is_white_space())
+                if(!el->src_el()->is_white_space() && !is_split_remnant(el))
                     not_ws_added = true;
             } else
             {

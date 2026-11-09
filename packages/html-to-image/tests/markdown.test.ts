@@ -82,7 +82,10 @@ describe("markdownToHtml", () => {
     );
     const imports = [...source.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1]);
     // (its own ./markdown-math-syntax.js is the maths syntax: it imports only marked's types; KaTeX is not here)
-    expect(imports.every((m) => m === "marked" || m.startsWith("highlight.js/") || m === "./markdown-math-syntax.js")).toBe(true);
+    expect(imports.every((m) => m === "marked" || m.startsWith("highlight.js/") || m === "./markdown-math-syntax.js" || m === "./markdown-blocks.js")).toBe(true);
+    // call-outs, figures and footnotes live in markdown-blocks.ts: it imports only marked's types and the template helpers
+    const blocks = fs.readFileSync(fileURLToPath(new URL("../src/markdown-blocks.ts", import.meta.url)), "utf8");
+    expect([...blocks.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1])).toEqual(["marked", "./markdown-template.js"]);
     const syntax = fs.readFileSync(fileURLToPath(new URL("../src/markdown-math-syntax.ts", import.meta.url)), "utf8");
     expect([...syntax.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1])).toEqual(["marked"]);
     expect(source).not.toMatch(/\bprocess\.|\brequire\(|node:/);

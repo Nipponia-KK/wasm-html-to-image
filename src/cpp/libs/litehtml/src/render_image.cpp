@@ -92,7 +92,14 @@ litehtml::pixel_t litehtml::render_item_image::_measure(
     // be used for the arithmetic below.
     float used_ratio = 0;  // height / width
     const aspect_ratio ar = css().get_aspect_ratio();
-    const bool has_intrinsic_ratio = sz.width > 0 && sz.height > 0;
+    // An SVG with no dimensions and no viewBox has no intrinsic ratio:
+    // its reported size is the default object size, and an auto axis takes
+    // its own default instead of a size transferred through a ratio. An
+    // explicit aspect-ratio property still transfers (handled above via
+    // has_intrinsic_ratio being false, which lets `auto <ratio>` fall back
+    // to the specified ratio).
+    const bool no_ratio = src_el()->is_no_ratio_replaced();
+    const bool has_intrinsic_ratio = sz.width > 0 && sz.height > 0 && !no_ratio;
     if (!ar.is_auto() && !(ar.use_intrinsic && has_intrinsic_ratio)) {
         if (ar.width > 0 && ar.height > 0) used_ratio = ar.height / ar.width;
     } else if (has_intrinsic_ratio) {
@@ -209,12 +216,16 @@ litehtml::pixel_t litehtml::render_item_image::_measure(
     } else if (width_is_auto) {
         if (used_ratio > 0) {
             m_pos.width = m_pos.height / used_ratio;
+        } else if (no_ratio) {
+            m_pos.width = sz.width;
         } else if (sz.height != 0) {
             m_pos.width = m_pos.height * sz.width / sz.height;
         }
     } else if (height_is_auto) {
         if (used_ratio > 0) {
             m_pos.height = m_pos.width * used_ratio;
+        } else if (no_ratio) {
+            m_pos.height = sz.height;
         } else if (sz.width != 0) {
             m_pos.height = m_pos.width * sz.height / sz.width;
         }
@@ -289,6 +300,8 @@ litehtml::pixel_t litehtml::render_item_image::_measure(
     auto derive_height = [&]() {
         if (used_ratio > 0) {
             m_pos.height = m_pos.width * used_ratio;
+        } else if (no_ratio) {
+            m_pos.height = sz.height;
         } else if (sz.width != 0) {
             m_pos.height = m_pos.width * sz.height / sz.width;
         }
@@ -296,6 +309,8 @@ litehtml::pixel_t litehtml::render_item_image::_measure(
     auto derive_width = [&]() {
         if (used_ratio > 0) {
             m_pos.width = m_pos.height / used_ratio;
+        } else if (no_ratio) {
+            m_pos.width = sz.width;
         } else if (sz.height != 0) {
             m_pos.width = m_pos.height * sz.width / sz.height;
         }

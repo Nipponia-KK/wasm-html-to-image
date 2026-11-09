@@ -16,6 +16,7 @@ namespace litehtml
 
 		bool	is_replaced() const override;
 		bool	is_ratio_only_replaced() const override;
+		bool	is_no_ratio_replaced() const override;
 		void	parse_attributes() override;
 		void	parse_presentational_hints() override;
 		void	compute_styles(bool recursive = true) override;

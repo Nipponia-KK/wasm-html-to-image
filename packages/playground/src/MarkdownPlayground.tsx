@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { listTemplates, markdownToDocument } from "wasm-html-to-image/markdown";
 import { PdfPreview } from "./PdfPreview";
+import { TemplateGallery } from "./TemplateGallery";
 import { usePdfRender } from "./usePdfRender";
 import {
   PAGE_SIZES,
@@ -15,16 +16,49 @@ import bookSample from "./samples/book.md?raw";
 import proposalSample from "./samples/proposal.md?raw";
 import diagramsSample from "./samples/diagrams.md?raw";
 import technicalSample from "./samples/technical.md?raw";
+import showcaseSample from "./samples/showcase.md?raw";
+import compactSample from "./samples/compact.md?raw";
+import manualSample from "./samples/manual.md?raw";
+import minutesSample from "./samples/minutes.md?raw";
+import letterSample from "./samples/letter.md?raw";
+import slidesSample from "./samples/slides.md?raw";
+import invoiceSample from "./samples/invoice.md?raw";
 
 const SAMPLES = [
-  { id: "report", label: "Report (Japanese)", text: reportSample },
-  { id: "proposal", label: "Proposal with diagrams (Japanese)", text: proposalSample },
+  { id: "report", label: "Report with charts and a long table (Japanese)", text: reportSample },
+  { id: "proposal", label: "Proposal with diagrams and a schedule (Japanese)", text: proposalSample },
+  { id: "showcase", label: "Feature tour (every element)", text: showcaseSample },
   { id: "diagrams", label: "Mermaid diagrams", text: diagramsSample },
-  { id: "book", label: "Book (Japanese)", text: bookSample },
-  { id: "technical", label: "Maths and code", text: technicalSample },
+  { id: "book", label: "Book: chapters and page numbers (Japanese)", text: bookSample },
+  { id: "technical", label: "Paper: maths, code and a flowchart", text: technicalSample },
+  { id: "compact", label: "Cheat sheet (compact)", text: compactSample },
+  { id: "manual", label: "Manual: numbered chapters and call-outs (Japanese)", text: manualSample },
+  { id: "minutes", label: "Meeting minutes (Japanese)", text: minutesSample },
+  { id: "letter", label: "Business letter (Japanese)", text: letterSample },
+  { id: "slides", label: "Slides: landscape pages (Japanese)", text: slidesSample },
+  { id: "invoice", label: "Invoice (Japanese)", text: invoiceSample },
 ] as const;
 
 const STORAGE_KEY = "markdown-playground-text";
+const PANEL_KEY = "markdown-playground-panel";
+
+/** The settings from the URL; with none in it (a bare link), the ones used last time, kept in localStorage. */
+const initialParams = (): URLSearchParams => {
+  const params = new URLSearchParams(window.location.search);
+  if ([...params.keys()].some((k) => k !== "mode")) return params;
+  try {
+    const saved = localStorage.getItem(PANEL_KEY);
+    if (saved) {
+      const restored = new URLSearchParams(saved);
+      const mode = params.get("mode");
+      if (mode) restored.set("mode", mode);
+      return restored;
+    }
+  } catch {
+    /* storage blocked: start from the defaults */
+  }
+  return params;
+};
 
 /** The text last typed, kept across reloads (a long text does not belong in the URL). */
 const loadText = (): string => {
@@ -52,8 +86,13 @@ const TriSelect: React.FC<{ value: Tri; onChange: (v: Tri) => void; autoLabel?: 
 
 export const MarkdownPlayground: React.FC = () => {
   const [text, setText] = useState(loadText);
-  const [panel, setPanel] = useState<MarkdownPanel>(() => panelFromParams(new URLSearchParams(window.location.search)));
-  const [tab, setTab] = useState<"html" | "diagnostics" | "logs">("html");
+  const [start] = useState(initialParams);
+  const [panel, setPanel] = useState<MarkdownPanel>(() => panelFromParams(start));
+  const [tab, setTab] = useState<"html" | "diagnostics" | "logs">(() => {
+    const t = start.get("tab");
+    return t === "diagnostics" || t === "logs" ? t : "html";
+  });
+  const [right, setRight] = useState<"pdf" | "templates">(() => (start.get("view") === "templates" ? "templates" : "pdf"));
   const [mathRenderer, setMathRenderer] = useState<Awaited<ReturnType<typeof loadMath>> | null>(null);
   const pdf = usePdfRender();
   const templates = useMemo(() => listTemplates(), []);
@@ -71,8 +110,18 @@ export const MarkdownPlayground: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     for (const k of [...params.keys()]) if (k !== "mode") params.delete(k);
     for (const [k, v] of panelToParams(panel)) params.set(k, v);
+    if (right === "templates") params.set("view", "templates");
+    if (tab !== "html") params.set("tab", tab);
     window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
-  }, [panel]);
+    // the same settings, without `mode`, are what a bare link starts from next time
+    const remembered = new URLSearchParams(params);
+    remembered.delete("mode");
+    try {
+      localStorage.setItem(PANEL_KEY, remembered.toString());
+    } catch {
+      /* storage blocked: only the URL carries the settings */
+    }
+  }, [panel, right, tab]);
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, text);
@@ -274,15 +323,46 @@ export const MarkdownPlayground: React.FC = () => {
           </fieldset>
         </section>
 
-        <section className="flex min-h-[560px] min-w-0 flex-col">
-          <PdfPreview
-            url={pdf.url}
-            bytes={pdf.bytes}
-            busy={pdf.busy}
-            error={conversionError ?? pdf.error}
-            time={pdf.time}
-            fileName="document.pdf"
-          />
+        <section className="flex min-h-[560px] min-w-0 flex-col gap-2">
+          <div className="flex gap-2 text-sm">
+            {(
+              [
+                ["pdf", "PDF"],
+                ["templates", `Templates (${templates.length})`],
+              ] as const
+            ).map(([id, text_]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setRight(id)}
+                className={`cursor-pointer rounded-md border px-3 py-1 ${
+                  right === id ? "border-blue-600 bg-blue-50 font-semibold text-blue-700" : "border-gray-300 bg-white text-gray-600 hover:bg-gray-50"
+                }`}
+              >
+                {text_}
+              </button>
+            ))}
+          </div>
+          {right === "pdf" ? (
+            <PdfPreview
+              url={pdf.url}
+              bytes={pdf.bytes}
+              busy={pdf.busy}
+              error={conversionError ?? pdf.error}
+              time={pdf.time}
+              fileName="document.pdf"
+            />
+          ) : (
+            <TemplateGallery
+              text={text}
+              panel={panel}
+              math={mathRenderer ?? undefined}
+              onPick={(name) => {
+                set("template", name);
+                setRight("pdf");
+              }}
+            />
+          )}
         </section>
       </div>
 

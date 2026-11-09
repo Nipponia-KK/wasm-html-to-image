@@ -13,6 +13,7 @@ describe("isImageInput: magic bytes", () => {
     ["png", PNG],
     ["gif89a", GIF89],
     ["avif", AVIF],
+    ["svg", new TextEncoder().encode('<svg width="100" height="100"></svg>')],
   ];
   it.each(cases)("%s is image input", (_name, bytes) => {
     expect(isImageInput(bytes)).toBe(true);
@@ -31,9 +32,21 @@ describe("isImageInput: magic bytes", () => {
 });
 
 describe("isImageInput: strings", () => {
-  it("treats data:image/ URLs as image input", () => {
+  it("treats data:image/ URLs and SVG elements as image input", () => {
     expect(isImageInput("data:image/png;base64,iVBORw0KGgo=")).toBe(true);
     expect(isImageInput("data:image/svg+xml,%3Csvg/%3E")).toBe(true);
+    expect(isImageInput('<svg width="100" height="100"></svg>')).toBe(true);
+    expect(isImageInput('<?xml version="1.0"?><svg></svg>')).toBe(true);
+    expect(isImageInput('<?xml version="1.0"?><!-- c --><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd"><svg></svg>')).toBe(true);
+    expect(isImageInput("\n  <svg/>")).toBe(true);
+  });
+
+  it("keeps HTML that merely contains an inline <svg> as HTML", () => {
+    expect(isImageInput('<!doctype html><html><body><svg width="10"></svg></body></html>')).toBe(false);
+    expect(isImageInput('<!DOCTYPE html><svg></svg>')).toBe(false);
+    expect(isImageInput('<div><svg></svg></div>')).toBe(false);
+    expect(isImageInput('<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><svg></svg></html>')).toBe(false);
+    expect(() => isImageInput(new TextEncoder().encode("<!doctype html><svg></svg>"))).toThrow(/unknown magic/);
   });
 
   it("treats other strings as HTML", () => {

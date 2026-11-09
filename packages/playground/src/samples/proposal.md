@@ -65,6 +65,33 @@ stateDiagram-v2
 2. 開発・テスト(3 か月)
 3. 移行・並行稼働(1 か月)
 
+```mermaid
+gantt
+  title 導入スケジュール
+  dateFormat YYYY-MM-DD
+  section 要件定義
+    ヒアリング・要件整理 :a1, 2026-11-02, 30d
+  section 開発
+    開発・結合テスト     :a2, after a1, 90d
+  section 移行
+    データ移行・並行稼働 :a3, after a2, 30d
+```
+
+システムの構成は次のとおりです。
+
+```mermaid
+architecture-beta
+  group cloud(cloud)[クラウド]
+  service web(server)[受発注画面] in cloud
+  service api(server)[API] in cloud
+  service db(database)[データベース] in cloud
+  service erp(internet)[基幹システム]
+
+  web:R -- L:api
+  api:R -- L:db
+  api:B --> T:erp
+```
+
 # 5. お見積り
 
 | 項目 | 金額(円) |

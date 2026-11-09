@@ -1,6 +1,7 @@
 #include "mermaid/erdiagram.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <map>
 
@@ -22,7 +23,7 @@ struct Entity {
     std::string id, title;
     std::vector<Attr> attrs;
     double w = 0, h = 0;
-    double type_w = 0, name_w = 0, key_w = 0;
+    double type_w = 0, name_w = 0, key_w = 0, comment_w = 0;
 };
 
 struct Relation {
@@ -87,7 +88,11 @@ bool add_attr(Entity& e, const std::string& raw) {
     if (tok.size() < 2) return false;
     a.type = tok[0];
     a.name = tok[1];
-    for (size_t k = 2; k < tok.size(); k++) a.keys += (a.keys.empty() ? "" : ",") + tok[k];
+    for (size_t k = 2; k < tok.size(); k++) {
+        std::string key = tok[k];
+        while (!key.empty() && key.back() == ',') key.pop_back();  // `PK, FK` tokenises with the comma on PK
+        if (!key.empty()) a.keys += (a.keys.empty() ? "" : ",") + key;
+    }
     e.attrs.push_back(a);
     return true;
 }
@@ -108,6 +113,48 @@ bool right_card(const std::string& t, Card& c) {
     else if (t == "o{") c = kZeroMany;
     else return false;
     return true;
+}
+
+// The relationship written in words: `A one to many B : label`, `A zero or more optionally to one or more B`.
+bool word_card(std::string t, Card& c) {
+    for (char& ch : t) ch = (char)std::tolower((unsigned char)ch);
+    if (t == "one or zero" || t == "zero or one") c = kZeroOne;
+    else if (t == "one or more" || t == "one or many" || t == "1+" || t == "many(1)") c = kOneMany;
+    else if (t == "zero or more" || t == "zero or many" || t == "0+" || t == "many(0)" || t == "many") c = kZeroMany;
+    else if (t == "one" || t == "only one" || t == "1") c = kOne;
+    else return false;
+    return true;
+}
+
+bool parse_worded_relation(const std::string& line, Relation& r, std::string& left, std::string& right, std::string& label) {
+    std::string head = line;
+    size_t colon = line.find(':');
+    if (colon != std::string::npos) {
+        head = trim(line.substr(0, colon));
+        label = unquote(line.substr(colon + 1));
+    }
+    std::vector<std::string> tok;
+    for (size_t i = 0; i < head.size();) {
+        while (i < head.size() && (head[i] == ' ' || head[i] == '	')) i++;
+        size_t j = i;
+        while (j < head.size() && head[j] != ' ' && head[j] != '	') j++;
+        if (j > i) tok.push_back(head.substr(i, j - i));
+        i = j;
+    }
+    for (size_t k = 2; k + 2 < tok.size(); k++) {
+        bool optional = tok[k] == "to" && tok[k - 1] == "optionally";
+        if (tok[k] != "to") continue;
+        size_t from = optional ? k - 1 : k;
+        std::string a, b;
+        for (size_t m = 1; m < from; m++) a += (a.empty() ? "" : " ") + tok[m];
+        for (size_t m = k + 1; m + 1 < tok.size(); m++) b += (b.empty() ? "" : " ") + tok[m];
+        if (!word_card(a, r.ca) || !word_card(b, r.cb)) continue;
+        r.dashed = optional;
+        left = tok[0];
+        right = tok.back();
+        return true;
+    }
+    return false;
 }
 
 bool parse(const std::string& source, Doc& d, std::string& error) {
@@ -142,6 +189,17 @@ bool parse(const std::string& source, Doc& d, std::string& error) {
         if (line.back() == '{') {
             open = entity_for(d, line.substr(0, line.size() - 1));
             continue;
+        }
+        {
+            Relation r;
+            std::string left, right, label;
+            if (parse_worded_relation(line, r, left, right, label)) {
+                r.a = entity_for(d, left);
+                r.b = entity_for(d, right);
+                r.label = label;
+                d.rels.push_back(r);
+                continue;
+            }
         }
         size_t p = line.find("--");
         bool dashed = false;
@@ -236,8 +294,10 @@ bool render_er(const std::string& source, const Options& options, std::string& s
             e.type_w = std::max(e.type_w, text.width(a.type, kAttrFont, 400));
             e.name_w = std::max(e.name_w, text.width(a.name, kAttrFont, 500));
             e.key_w = std::max(e.key_w, text.width(a.keys, kAttrFont - 1, 600));
+            e.comment_w = std::max(e.comment_w, text.width(a.comment, kAttrFont, 400));
         }
-        double cols = e.type_w + e.name_w + e.key_w + (e.key_w > 0 ? 3 : 2) * kCellPad * 1.0 + kCellPad;
+        int ncols = 2 + (e.key_w > 0 ? 1 : 0) + (e.comment_w > 0 ? 1 : 0);
+        double cols = e.type_w + e.name_w + e.key_w + e.comment_w + (ncols + 1) * kCellPad;
         e.w = std::max(std::max(100.0, text.width(e.title, kNodeFont, 600) + 2 * kPadX), cols);
         e.h = kHead + (e.attrs.empty() ? 8 : e.attrs.size() * kRow + 6);
         ln[k].w = e.w;
@@ -249,7 +309,7 @@ bool render_er(const std::string& source, const Options& options, std::string& s
         le[k].from = d.rels[k].a;
         le[k].to = d.rels[k].b;
         if (!d.rels[k].label.empty()) {
-            label_lines[k] = split_lines(d.rels[k].label);
+            label_lines[k] = wrap_lines(text, split_lines(d.rels[k].label), kEdgeFont, kEdgeWeight, kWrapWidth);
             le[k].label_w = text.block_width(label_lines[k], kEdgeFont, kEdgeWeight) + 16;
             le[k].label_h = label_lines[k].size() * kEdgeFont * kLineHeight + 16;
         }
@@ -277,7 +337,7 @@ bool render_er(const std::string& source, const Options& options, std::string& s
         if (label_lines[k].empty()) continue;
         Pt c = at(lay.label_center[k]);
         body += "<g class=\"edge-label\">\n<rect x=\"" + num(c.x - le[k].label_w / 2) + "\" y=\"" + num(c.y - le[k].label_h / 2) + "\" width=\"" + num(le[k].label_w) + "\" height=\"" +
-                num(le[k].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.bg + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\"/>\n";
+                num(le[k].label_h) + "\" rx=\"2\" ry=\"2\" fill=\"" + th.label_bg + "\" stroke=\"" + th.label_stroke + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, label_lines[k], c.x, c.y, kEdgeFont, kEdgeWeight, th.text_sec);
         body += "</g>\n";
     }
@@ -288,14 +348,18 @@ bool render_er(const std::string& source, const Options& options, std::string& s
         body += "<g class=\"node\">\n<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(e.w) + "\" height=\"" + num(e.h) + "\"" + d.sheet.paint(e.id, th.surface, th.border) + "/>\n";
         body += "<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(e.w) + "\" height=\"" + num(kHead) + "\" fill=\"" + th.group_hdr + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
         centered_text(body, th, {e.title}, p.x, y + kHead / 2, kNodeFont, 600, th.text);
-        double type_x = x + kCellPad, name_x = type_x + e.type_w + kCellPad, key_x = x + e.w - kCellPad;
+        double type_x = x + kCellPad, name_x = type_x + e.type_w + kCellPad;
+        bool commented = e.comment_w > 0;
+        double key_x = commented ? name_x + e.name_w + kCellPad : x + e.w - kCellPad;
+        double comment_x = key_x + e.key_w + kCellPad;
         for (size_t m = 0; m < e.attrs.size(); m++) {
             const Attr& a = e.attrs[m];
             double cy = y + kHead + 3 + m * kRow + kRow / 2;
             if (m % 2 == 1) body += "<rect x=\"" + num(x + 0.5) + "\" y=\"" + num(cy - kRow / 2) + "\" width=\"" + num(e.w - 1) + "\" height=\"" + num(kRow) + "\" fill=\"" + th.group_hdr + "\"/>\n";
             aligned_text(body, th, {a.type}, type_x, cy, kAttrFont, 400, th.text_sec, "start");
             aligned_text(body, th, {a.name}, name_x, cy, kAttrFont, 500, th.text, "start");
-            if (!a.keys.empty()) aligned_text(body, th, {a.keys}, key_x, cy, kAttrFont - 1, 600, th.text_sec, "end");
+            if (!a.keys.empty()) aligned_text(body, th, {a.keys}, key_x, cy, kAttrFont - 1, 600, th.text_sec, commented ? "start" : "end");
+            if (!a.comment.empty()) aligned_text(body, th, {a.comment}, comment_x, cy, kAttrFont, 400, th.text_sec, "start");
         }
         body += "</g>\n";
     }

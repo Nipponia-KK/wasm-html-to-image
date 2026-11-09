@@ -250,6 +250,21 @@ void css::sort_selectors()
 	{
 		bool added = false;
 
+		// ::part(): the rightmost compound names the shadow host, but the rule
+		// applies to the part element inside the host's shadow tree, whose
+		// tag/id/class cannot be known from the selector. Such selectors must
+		// be candidates for every element; select() resolves the host.
+		for (const auto& attr : selector->m_right.m_attrs)
+		{
+			if (attr.type == select_pseudo_element && attr.name == _id("part"))
+			{
+				m_universal_selectors.push_back(selector);
+				added = true;
+				break;
+			}
+		}
+		if (added) continue;
+
 		// Check for ID
 		for (const auto& attr : selector->m_right.m_attrs)
 		{

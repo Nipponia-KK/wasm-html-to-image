@@ -636,6 +636,18 @@ std::list<litehtml::flex_line> litehtml::render_item_flex::get_lines(const liteh
 			el->src_el()->is_ratio_only_replaced() && el->css().get_width().is_predefined())
 		{
 			item_size.render_inline_size() = 0;
+		} else if(self_size.mode == writing_mode_horizontal_tb &&
+			(self_size.size_mode & containing_block_context::size_mode_content) &&
+			!(self_size.size_mode & containing_block_context::size_mode_min_content) &&
+			self_size.render_inline_size().type == containing_block_context::cbc_value_type_auto &&
+			el->src_el()->is_ratio_only_replaced() && !el->css().get_width().is_predefined() &&
+			el->css().get_width().units() == css_units_percentage)
+		{
+			// A percentage width is cyclic here too, but unlike `auto` its max-content contribution is
+			// the default object width (Blink: a 100% viewBox-only svg in a shrink-to-fit column is 300 wide, an
+			// `auto` one 0), so the percentage resolves against that instead of the trial width.
+			// (a ratio-only box has no natural width of its own: the 300px default object width.)
+			item_size.render_inline_size() = 300;
 		}
 		item->init(item_size, fmt_ctx, css().get_flex_align_items());
 		item->src_order = src_order++;

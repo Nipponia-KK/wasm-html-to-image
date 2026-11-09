@@ -316,6 +316,7 @@ void SatoruInstance::collect_resources(const std::string& html, int width, int h
 
     auto font_requests_start = std::chrono::high_resolution_clock::time_point{};
     if (collect_profile_enabled) font_requests_start = std::chrono::high_resolution_clock::now();
+    render_container->add_used_codepoints(context.svgImageCodepoints);
     const auto& usedCodepoints = render_container->get_used_codepoints();
     auto requestedAttribs = render_container->get_requested_font_attributes();
 
@@ -325,6 +326,17 @@ void SatoruInstance::collect_resources(const std::string& html, int width, int h
         if (req.family == "sans-serif") {
             hasSansSerif = true;
             break;
+        }
+    }
+    // The families the <text> of SVG images names (the layout never sees them).
+    for (const auto& family : context.svgImageFamilies) {
+        for (int weight : {400, 700}) {
+            if (weight == 700 && !context.svgImageBold) continue;
+            font_request req;
+            req.family = family;
+            req.weight = weight;
+            req.slant = SkFontStyle::kUpright_Slant;
+            requestedAttribs.insert(req);
         }
     }
     if (!hasSansSerif) {
@@ -780,12 +792,14 @@ int satoru_api_get_last_svg_size(SatoruInstance* inst) { return (int)inst->conte
 
 void satoru_api_collect_resources(SatoruInstance* inst, const std::string& html, int width, int height,
                            int mediaType) {
+    inst->context.refreshSvgImages();
     inst->collect_resources(html, normalize_viewport_width(width), height, mediaType);
 }
 
 void satoru_api_collect_resources_pages(SatoruInstance* inst, const std::vector<std::string>& htmls,
                                         int width, int height, int mediaType) {
     int layout_width = normalize_viewport_width(width);
+    inst->context.refreshSvgImages();
     for (const auto& html : htmls) {
         inst->collect_resources(html, layout_width, height, mediaType);
     }

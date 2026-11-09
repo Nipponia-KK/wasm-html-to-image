@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <map>
 
 #include "mermaid/mermaid_internal.h"
@@ -20,6 +21,9 @@ struct Block {
     Shape shape = Shape::Rect;
     int span = 1;
     bool space = false;
+    bool group = false;      // `block:id ... end`: its children are laid out in its own grid
+    int parent = -1;         // the enclosing group, -1 at the top
+    int columns = 0;         // of a group; 0 = as many as its children's spans add up to
     int col = 0, row = 0;
     double x = 0, y = 0, w = 0, h = 0;
     std::vector<std::string> lines;
@@ -107,6 +111,12 @@ bool render_block(const std::string& source, const Options& options, std::string
     std::vector<Link> links;
     std::map<std::string, int> index;
     int columns = 0;
+    std::vector<int> open;  // the groups being read, innermost last
+    auto add = [&](Block b) {
+        b.parent = open.empty() ? -1 : open.back();
+        blocks.push_back(b);
+        return (int)blocks.size() - 1;
+    };
     bool first = true;
     size_t i = 0;
     while (i <= source.size()) {
@@ -119,19 +129,53 @@ bool render_block(const std::string& source, const Options& options, std::string
             continue;
         }
         if (starts(line, "columns ")) {
-            columns = std::atoi(line.c_str() + 8);
-            if (columns < 1) {
+            int n = std::atoi(line.c_str() + 8);
+            if (n < 1) {
                 error = "columns needs a positive number: " + line;
                 return false;
             }
+            if (open.empty()) columns = n;
+            else blocks[open.back()].columns = n;
             continue;
         }
-        if (starts(line, "block:") || line == "end" || starts(line, "block ")) {
-            error = "nested blocks are not supported";
-            return false;
+        if (line == "end") {
+            if (open.empty()) {
+                error = "end without a block";
+                return false;
+            }
+            open.pop_back();
+            continue;
+        }
+        if (starts(line, "block:") || line == "block") {
+            // `block:id`, `block:id:span`
+            Block g;
+            g.group = true;
+            std::string rest = line.size() > 6 ? line.substr(6) : "";
+            size_t c = rest.find(':');
+            if (c != std::string::npos) {
+                char* end;
+                long n = std::strtol(rest.c_str() + c + 1, &end, 10);
+                if (*end != 0 || n < 1) {
+                    error = "cannot read the block: " + line;
+                    return false;
+                }
+                g.span = (int)n;
+                rest = rest.substr(0, c);
+            }
+            g.id = trim(rest);
+            if (g.id.empty()) g.id = "_group" + std::to_string(blocks.size());
+            int at = add(g);
+            index[g.id] = at;
+            open.push_back(at);
+            continue;
         }
         if (sheet.take(line)) continue;
-        size_t arrow = line.find("-->");
+        // the first `-->` outside quotes: a block's label may hold one
+        size_t arrow = std::string::npos;
+        for (size_t k = 0, quotes = 0; k + 2 < line.size() + 0 && arrow == std::string::npos; k++) {
+            if (line[k] == '"') quotes++;
+            else if (quotes % 2 == 0 && line.compare(k, 3, "-->") == 0) arrow = k;
+        }
         if (arrow != std::string::npos) {
             // `a --> b` or `a -- "text" --> b`
             std::string left = trim(line.substr(0, arrow)), right = trim(line.substr(arrow + 3)), label;
@@ -140,9 +184,14 @@ bool render_block(const std::string& source, const Options& options, std::string
                 label = unquote(left.substr(dd + 2));
                 left = trim(left.substr(0, dd));
             }
-            if (!index.count(left) || !index.count(right)) {
-                error = "unknown block in: " + line;
-                return false;
+            for (const std::string* side : {&left, &right}) {
+                if (index.count(*side)) continue;
+                Block b;
+                if (side->empty() || !parse_block(*side, b)) {
+                    error = "unknown block in: " + line;
+                    return false;
+                }
+                index[b.id] = add(b);
             }
             links.push_back({index[left], index[right], label});
             continue;
@@ -158,56 +207,99 @@ bool render_block(const std::string& source, const Options& options, std::string
                 error = "cannot read the block: " + tok;
                 return false;
             }
-            blocks.push_back(b);
-            if (!b.space) index[b.id] = (int)blocks.size() - 1;
+            int at = add(b);
+            if (!b.space) index[b.id] = at;
         }
     }
+    if (!open.empty()) {
+        error = "block " + blocks[open.back()].id + " is not closed with end";
+        return false;
+    }
     size_t real = 0;
-    for (auto& b : blocks) real += !b.space;
+    for (auto& b : blocks) real += !b.space && !b.group;
     if (real == 0) {
         error = "a block diagram needs at least one block";
         return false;
     }
-    if (columns == 0) {
-        for (auto& b : blocks) columns += b.span;
-    }
+    // the children of each group (index -1: the top level), in order
+    std::vector<std::vector<int>> kids(blocks.size() + 1);
+    for (size_t k = 0; k < blocks.size(); k++) kids[blocks[k].parent + 1].push_back((int)k);
+    auto columns_of = [&](int group) {
+        int n = group < 0 ? columns : blocks[group].columns;
+        if (n == 0)
+            for (int k : kids[group + 1]) n += blocks[k].span;
+        return std::max(1, n);
+    };
     Theme th = make_theme(options);
     Text text{options};
-    const double kGap = 16, kH = 52, kFont = 13;
-    // one cell width for the whole grid, wide enough for the widest label per column it spans
-    double cell = 80;
+    const double kGap = 16, kH = 52, kFont = 13, kPad = 12;
+    double row_height = kH;
     for (auto& b : blocks) {
-        if (b.space) continue;
-        b.lines = split_lines(b.label);
-        double w = text.block_width(b.lines, kFont, 500) + 32 + (b.shape == Shape::Diamond ? 40 : 0);
-        cell = std::max(cell, (w - (b.span - 1) * kGap) / std::max(1, std::min(b.span, columns)));
-    }
-    // placement: left to right, a block that does not fit in the row starts the next one
-    int col = 0, row = 0;
-    std::vector<double> row_h;
-    for (auto& b : blocks) {
-        int span = std::min(b.span, columns);
-        if (col + span > columns) col = 0, row++;
-        b.col = col;
-        b.row = row;
-        b.span = span;
-        col += span;
-        if (col >= columns) col = 0, row++;
-    }
-    int rows = 0;
-    for (auto& b : blocks) rows = std::max(rows, b.row + 1);
-    for (auto& b : blocks) {
-        b.w = b.span * cell + (b.span - 1) * kGap;
+        if (b.space || b.group) continue;
+        b.lines = wrap_lines(text, split_lines(b.label), kFont, 500, kWrapWidth);
         b.h = std::max(kH, b.lines.size() * kFont * kLineHeight + 24);
         if (b.shape == Shape::Circle) b.h = std::max(b.h, 64.0);
+        row_height = std::max(row_height, b.h);
     }
-    double row_height = kH;
-    for (auto& b : blocks) row_height = std::max(row_height, b.h);
+    // Lays a group's children out in its own grid of `width`: left to right, a block that does not fit in
+    // the row starts the next one. Positions are relative to the group's inner corner; returns the inner height.
+    // A group takes the width of the columns it spans, and its children share that width.
+    std::function<double(int, double)> layout = [&](int group, double width) {
+        const std::vector<int>& ks = kids[group + 1];
+        int cols = columns_of(group);
+        double cell = (width - (cols - 1) * kGap) / cols;
+        int col = 0, row = 0;
+        for (int k : ks) {
+            Block& b = blocks[k];
+            b.span = std::min(b.span, cols);
+            if (col + b.span > cols) col = 0, row++;
+            b.col = col;
+            b.row = row;
+            col += b.span;
+            if (col >= cols) col = 0, row++;
+            b.w = b.span * cell + (b.span - 1) * kGap;
+        }
+        int rows = 0;
+        for (int k : ks) rows = std::max(rows, blocks[k].row + 1);
+        std::vector<double> heights(rows, row_height);
+        for (int k : ks) {
+            Block& b = blocks[k];
+            if (b.group) b.h = layout(k, b.w - 2 * kPad) + 2 * kPad;
+            heights[b.row] = std::max(heights[b.row], b.h);
+        }
+        std::vector<double> tops(rows, 0.0);
+        for (int r = 1; r < rows; r++) tops[r] = tops[r - 1] + heights[r - 1] + kGap + 8;
+        for (int k : ks) {
+            Block& b = blocks[k];
+            b.x = b.col * (cell + kGap);
+            b.y = tops[b.row] + (heights[b.row] - b.h) / 2;
+        }
+        return rows ? tops[rows - 1] + heights[rows - 1] : 0.0;
+    };
+    // one cell width for the whole grid, wide enough for the widest label in the cell it sits in: widen
+    // until no block's label overflows, which nested groups make depend on the layout itself
+    double top_cols = columns_of(-1), width = 80 * top_cols + (top_cols - 1) * kGap, inner = 0;
     for (auto& b : blocks) {
-        b.x = kMargin + b.col * (cell + kGap);
-        b.y = kMargin + b.row * (row_height + kGap + 8) + (row_height - b.h) / 2;
+        if (b.space || b.group) continue;
+        b.lines = wrap_lines(text, split_lines(b.label), kFont, 500, kWrapWidth);
     }
-    double W = kMargin * 2 + columns * cell + (columns - 1) * kGap, H = kMargin * 2 + rows * row_height + (rows - 1) * (kGap + 8);
+    for (int pass = 0; pass < 12; pass++) {
+        inner = layout(-1, width);
+        double grow = 1;
+        for (auto& b : blocks) {
+            if (b.space || b.group) continue;
+            double need = text.block_width(b.lines, kFont, 500) + 32 + (b.shape == Shape::Diamond ? 40 : 0);
+            if (need > b.w + 0.5) grow = std::max(grow, need / b.w);
+        }
+        if (grow <= 1) break;
+        width *= grow;
+    }
+    // to absolute positions: a parent comes before its children in the list
+    for (auto& b : blocks) {
+        if (b.parent < 0) b.x += kMargin, b.y += kMargin;
+        else b.x += blocks[b.parent].x + kPad, b.y += blocks[b.parent].y + kPad;
+    }
+    double W = kMargin * 2 + width, H = kMargin * 2 + inner;
 
     std::string body, edges;
     for (auto& l : links) {
@@ -225,7 +317,7 @@ bool render_block(const std::string& source, const Options& options, std::string
         if (std::fabs(dy) < 1) {
             for (size_t k = 0; k < blocks.size(); k++) {
                 const Block& o = blocks[k];
-                if (o.space || &o == &a || &o == &b) continue;
+                if (o.space || o.group || &o == &a || &o == &b) continue;
                 if (o.x + o.w > std::min(ax, bx) && o.x < std::max(ax, bx) && std::fabs(o.y + o.h / 2 - ay) < 1) blocked = true;
             }
         }
@@ -258,6 +350,11 @@ bool render_block(const std::string& source, const Options& options, std::string
     }
     for (auto& b : blocks) {
         if (b.space) continue;
+        if (b.group) {
+            body += "<rect class=\"group\" x=\"" + num(b.x) + "\" y=\"" + num(b.y) + "\" width=\"" + num(b.w) + "\" height=\"" + num(b.h) + "\" rx=\"4\" fill=\"" + th.surface +
+                    "\" fill-opacity=\"0.4\" stroke=\"" + th.border + "\" stroke-width=\"1\" stroke-dasharray=\"4 3\"/>\n";
+            continue;
+        }
         double cx = b.x + b.w / 2, cy = b.y + b.h / 2;
         std::string style = sheet.paint(b.id, th.surface, th.border);
         body += "<g class=\"node\">\n";

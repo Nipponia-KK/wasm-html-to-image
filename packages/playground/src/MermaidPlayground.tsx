@@ -1,13 +1,23 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { MERMAID_THEMES, mermaidToHtml, renderMermaid, type MermaidOptions } from "wasm-html-to-image/workers";
+import { MERMAID_THEMES, mermaidToHtml, renderMermaid, type MermaidOptions, type MermaidWarning } from "wasm-html-to-image/workers";
 import { MERMAID_SAMPLES, type MermaidSample } from "./mermaidSamples";
+import useJxlSupport from "./useJxlSupport";
+import { decodeText, encodeText, MAX_SHARED_LENGTH } from "./shareText";
 
 const STORAGE_KEY = "mermaid-playground-text";
-const FORMATS = ["svg", "png", "webp", "jpeg", "pdf"] as const;
+const FORMATS = ["svg", "png", "webp", "jpeg", "avif", "jxl", "pdf"] as const;
 type Format = (typeof FORMATS)[number];
 type Mode = "strict" | "compat" | "recover";
 
-const MIME: Record<Format, string> = { svg: "image/svg+xml", png: "image/png", webp: "image/webp", jpeg: "image/jpeg", pdf: "application/pdf" };
+const MIME: Record<Format, string> = {
+  svg: "image/svg+xml",
+  png: "image/png",
+  webp: "image/webp",
+  jpeg: "image/jpeg",
+  avif: "image/avif",
+  jxl: "image/jxl",
+  pdf: "application/pdf",
+};
 
 interface Panel {
   theme: string;
@@ -82,15 +92,27 @@ interface Output {
   format: Format;
 }
 
+/** Whether a #rrggbb colour is dark (by its luminance); anything else counts as light. */
+const isDark = (hex: string): boolean => {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return false;
+  const [r, g, b] = [m[1], m[2], m[3]].map((h) => parseInt(h, 16));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+};
+
 const GROUPS: MermaidSample["group"][] = ["Diagrams", "Charts", "Structure", "Features"];
 
 export const MermaidPlayground: React.FC = () => {
   const [text, setText] = useState(loadText);
   const [panel, setPanel] = useState<Panel>(() => panelFromParams(new URLSearchParams(window.location.search)));
-  const [view, setView] = useState<"editor" | "gallery">("editor");
+  const [view, setView] = useState<"editor" | "gallery">(() => (new URLSearchParams(window.location.search).get("view") === "gallery" ? "gallery" : "editor"));
+  const jxlSupport = useJxlSupport();
+  // The diagram itself rides in the URL (compressed) so a link shares it, not only the settings.
+  const [shared, setShared] = useState(() => new URLSearchParams(window.location.search).get("src") ?? "");
   const [out, setOut] = useState<Output | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<MermaidWarning[]>([]); // what the engine repaired, or could not read
   const [tab, setTab] = useState<"svg" | "html">("svg");
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   const latest = useRef(0);
@@ -102,8 +124,26 @@ export const MermaidPlayground: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     for (const k of [...params.keys()]) if (k !== "mode") params.delete(k);
     for (const [k, v] of panelToParams(panel)) params.set(k, v);
+    if (view === "gallery") params.set("view", "gallery");
+    if (shared) params.set("src", shared);
     window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}`);
-  }, [panel]);
+  }, [panel, view, shared]);
+  // a link with a diagram in it opens that diagram
+  useEffect(() => {
+    const src = new URLSearchParams(window.location.search).get("src");
+    if (src) void decodeText(src).then((t) => t !== undefined && setText(t));
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const encoded = await encodeText(text);
+      if (!cancelled) setShared(encoded && encoded.length <= MAX_SHARED_LENGTH ? encoded : "");
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [text]);
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, text);
@@ -126,7 +166,8 @@ export const MermaidPlayground: React.FC = () => {
     const timer = setTimeout(async () => {
       const started = performance.now();
       try {
-        const result = await renderMermaid(text, toOptions(panel));
+        const told: MermaidWarning[] = [];
+        const result = await renderMermaid(text, { ...toOptions(panel), onWarning: (w) => told.push(w) });
         if (id !== latest.current) return;
         const data = result.data as string | Uint8Array;
         const blob = new Blob([typeof data === "string" ? data : data.slice()], { type: MIME[panel.format] });
@@ -135,8 +176,12 @@ export const MermaidPlayground: React.FC = () => {
         urlRef.current = url;
         setOut({ url, bytes: blob.size, text: typeof data === "string" ? data : null, time: performance.now() - started, format: panel.format });
         setError(null);
+        setNotes(told);
       } catch (e) {
-        if (id === latest.current) setError(e instanceof Error ? e.message : String(e));
+        if (id === latest.current) {
+          setError(e instanceof Error ? e.message : String(e));
+          setNotes([]);
+        }
       } finally {
         if (id === latest.current) setBusy(false);
       }
@@ -167,6 +212,12 @@ export const MermaidPlayground: React.FC = () => {
   };
 
   const transparent = panel.format === "svg" || panel.format === "png" || panel.format === "webp";
+  // A transparent diagram of a dark theme is previewed on that theme's page colour: it is drawn for a dark page and
+  // its lines vanish on the checkerboard. Light themes keep the checkerboard, which shows what is transparent.
+  const themeBg = (MERMAID_THEMES as Record<string, { bg: string }>)[panel.theme]?.bg ?? "#ffffff";
+  const darkTheme = isDark(themeBg);
+  const checker = { backgroundColor: "#fff", backgroundImage: "conic-gradient(#eee 25%, transparent 0 50%, #eee 0 75%, transparent 0)", backgroundSize: "16px 16px" };
+  const previewStyle: React.CSSProperties = !transparent ? { backgroundColor: "#f3f4f6" } : darkTheme && !panel.background ? { backgroundColor: themeBg } : checker;
 
   return (
     <div className="flex flex-col gap-4">
@@ -330,17 +381,24 @@ export const MermaidPlayground: React.FC = () => {
               </button>
             </div>
             {error && <pre className="m-0 whitespace-pre-wrap border-b border-red-200 bg-red-50 p-3 text-xs text-red-700">{error}</pre>}
+            {notes.length > 0 && (
+              <ul className="m-0 flex list-none flex-col gap-1 border-b border-gray-200 p-3 text-xs">
+                {notes.map((n, k) => (
+                  <li key={k} className={n.code === "MERMAID_ERROR" ? "text-red-700" : "text-amber-700"}>
+                    <b>{n.code === "MERMAID_ERROR" ? "Could not read" : "Repaired"}</b>: {n.message}
+                  </li>
+                ))}
+              </ul>
+            )}
             <div
               className="min-h-[28rem] flex-1 overflow-auto p-3"
-              style={
-                transparent
-                  ? { backgroundColor: "#fff", backgroundImage: "conic-gradient(#eee 25%, transparent 0 50%, #eee 0 75%, transparent 0)", backgroundSize: "16px 16px" }
-                  : { backgroundColor: "#f3f4f6" }
-              }
+              style={previewStyle}
             >
               {out ? (
                 out.format === "pdf" ? (
                   <embed src={out.url} type="application/pdf" className="h-[28rem] w-full border-0" />
+                ) : out.format === "jxl" && jxlSupport === false ? (
+                  <p className="text-sm text-gray-500">This browser cannot show JXL (Safari can). Use Download to get the file.</p>
                 ) : (
                   <img src={out.url} alt="diagram" onLoad={(e) => setSize({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })} className="max-w-none" />
                 )

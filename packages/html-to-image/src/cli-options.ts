@@ -8,6 +8,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { isImageInput } from "./input.js";
 import type { HtmlToImageOptions, OutputFormat } from "./core.js";
+import type { JavaScriptOptions } from "./js-apply.js";
+import { MERMAID_THEMES, type MermaidOptions, type MermaidTheme } from "./mermaid.js";
 
 /** Flags as parsed by commander (see `./cli.ts`). */
 export interface CliFlags {
@@ -35,7 +37,7 @@ export interface CliFlags {
   animationLoop?: number;
   /** `--font <path-or-glob>` (repeatable); local font files to register. */
   font?: string[];
-  /** `--js`: run the page's scripts (jsdom) before rendering. */
+  /** `--js`: run the page's scripts (QuickJS) before rendering. */
   js?: boolean;
   /** `--markdown`: treat the input as Markdown (implied by a `.md` / `.markdown` file). */
   markdown?: boolean;
@@ -63,12 +65,20 @@ export interface CliFlags {
   math?: boolean;
   /** `--markdown-css <path>`: extra stylesheet appended after the built-in one. */
   markdownCss?: string;
+  /** `--mermaid`: treat the input as a Mermaid diagram (implied by a `.mmd` / `.mermaid` file). */
+  mermaid?: boolean;
+  /** `--mermaid-theme <name>`: one of `MERMAID_THEMES`. */
+  mermaidTheme?: string;
+  /** `--mermaid-mode <strict|compat|recover>`. */
+  mermaidMode?: string;
+  /** `--mermaid-directives`: honour `%%{init}%%` and frontmatter `config:`. */
+  mermaidDirectives?: boolean;
   /** `--js-wait <ms|selector>`: a number is the settle time after load, anything else a CSS selector to wait for. */
   jsWait?: string;
 }
 
 /** `--js-wait`: milliseconds to settle after load, or a CSS selector to wait for. */
-export function resolveJavaScript(wait: string | undefined): true | { settleMs?: number; waitFor?: string } {
+export function resolveJavaScript(wait: string | undefined): true | JavaScriptOptions {
   if (wait === undefined || wait === "") return true;
   return /^\d+(\.\d+)?$/.test(wait) ? { settleMs: Number(wait) } : { waitFor: wait };
 }
@@ -157,6 +167,47 @@ export async function isFile(input: string): Promise<boolean> {
 /** Markdown text passed with `--markdown` instead of a file path. */
 export async function isInlineMarkdown(input: string, flags: { markdown?: boolean }): Promise<boolean> {
   return !!flags.markdown && input !== "-" && !isUrlInput(input) && !(await isFile(input));
+}
+
+/** A `.mmd` / `.mermaid` file path is a Mermaid diagram without `--mermaid`. */
+export function isMermaidPath(input: string): boolean {
+  return /\.(mmd|mermaid)$/i.test(input) && !isUrlInput(input);
+}
+
+/** Mermaid text passed with `--mermaid` instead of a file path. */
+export async function isInlineMermaid(input: string, flags: { mermaid?: boolean }): Promise<boolean> {
+  return !!flags.mermaid && input !== "-" && !isUrlInput(input) && !(await isFile(input));
+}
+
+/** The input is a Mermaid diagram: `--mermaid`, or a `.mmd` / `.mermaid` file. */
+export function isMermaidInput(input: string, flags: { mermaid?: boolean }): boolean {
+  return !!flags.mermaid || isMermaidPath(input);
+}
+
+/** The diagram's source: the text itself (`--mermaid`), stdin (`-`) or a file. */
+export async function loadMermaidSource(input: string, flags: { mermaid?: boolean }): Promise<string> {
+  if (await isInlineMermaid(input, flags)) return input;
+  if (input === "-") return readStdin();
+  return fs.readFile(input, "utf-8");
+}
+
+/** The `renderMermaid` options the flags ask for; an unknown theme or mode is an error that lists the choices. */
+export function mermaidOptionsFromFlags(flags: CliFlags, widthGiven: boolean): MermaidOptions {
+  const themes = Object.keys(MERMAID_THEMES);
+  if (flags.mermaidTheme !== undefined && !themes.includes(flags.mermaidTheme)) {
+    throw new Error(`unsupported mermaid theme "${flags.mermaidTheme}". Choose from: ${themes.join(", ")}`);
+  }
+  if (flags.mermaidMode !== undefined && !["strict", "compat", "recover"].includes(flags.mermaidMode)) {
+    throw new Error(`unsupported mermaid mode "${flags.mermaidMode}". Choose from: strict, compat, recover`);
+  }
+  return {
+    format: flags.format,
+    ...(flags.mermaidTheme ? { theme: flags.mermaidTheme as MermaidTheme } : {}),
+    ...(flags.mermaidMode ? { mode: flags.mermaidMode as "strict" | "compat" | "recover" } : {}),
+    ...(flags.mermaidDirectives ? { directives: true } : {}),
+    ...(flags.accent ? { accent: flags.accent } : {}),
+    ...(widthGiven && flags.width ? { width: flags.width } : {}),
+  };
 }
 
 /** A `.md` / `.markdown` file path is Markdown input without `--markdown`. */

@@ -22,6 +22,7 @@ import {
   loadPrecompiledModule,
   type HtmlToImageModule,
 } from "./loader.js";
+import { mermaidRenderOptions, type RenderMermaid } from "./mermaid.js";
 import {
   htmlToImage,
   type HtmlToImageOptions,
@@ -32,6 +33,7 @@ export type {
   OutputFormat,
   RenderOptions,
   HtmlToImageOptions,
+  LayoutBox,
   RenderResult,
   DiagnosticMessage,
   FontDiagnostic,
@@ -40,7 +42,8 @@ export type {
   ResolveResourceHook,
   ResourceDiagnostic,
 } from "./core.js";
-export { DIAGNOSTIC_CODES, LogLevel } from "./core.js";
+export { DIAGNOSTIC_CODES, LogLevel, isImageInput } from "./core.js";
+export { clearResourceCache } from "./core-resources.js";
 export type {
   HtmlToImageModule,
   EmscriptenModuleArg,
@@ -86,6 +89,7 @@ export async function render(
   return htmlToImage(await getDefaultModule(wasm ?? htmlToImageWasm), options);
 }
 
-export type { MermaidOptions, MermaidTheme, RenderFn } from "./mermaid.js";
-// Mermaid: `renderMermaidWith((options) => render(options, wasm), source, { format: "png" })`
-export { MERMAID_THEMES, mermaidToHtml, renderMermaidWith } from "./mermaid.js";
+export type { MermaidInput, MermaidOptions, MermaidTheme, MermaidWarning, RenderFn, RenderMermaid } from "./mermaid.js";
+export { MERMAID_THEMES, mermaidToHtml } from "./mermaid.js";
+/** Render a Mermaid diagram as SVG text (default) or an image, with the bundled WASM. */
+export const renderMermaid: RenderMermaid = ((source, options) => render(mermaidRenderOptions(source, options))) as RenderMermaid;

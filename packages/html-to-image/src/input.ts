@@ -24,8 +24,32 @@ function ascii(
   return s;
 }
 
+/**
+ * A document whose root element is `<svg>`: only an XML prolog, comments and an `svg` doctype may
+ * come before it. An HTML page that merely contains an inline `<svg>` (an icon in the header) has
+ * `<!doctype html>` or an `<html>` root first, so it stays HTML.
+ */
+const SVG_DOCUMENT =
+  /^(?:\s*(?:<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!doctype\s+svg[^>]*>))*\s*<svg[\s/>]/i;
+
+/** Check if byte sequence looks like an SVG document. */
+function isSvgBytes(bytes: Uint8Array): boolean {
+  // Skip UTF-8 BOM if present
+  const start =
+    bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+      ? 3
+      : 0;
+  const head = ascii(bytes, start, Math.min(bytes.length, start + 1024));
+  return !!head && SVG_DOCUMENT.test(head);
+}
+
+/** Check if string looks like an SVG document. */
+function isSvgString(s: string): boolean {
+  return SVG_DOCUMENT.test(s.slice(0, 1024));
+}
+
 /** Detect a known image container by magic bytes; `null` when unknown. */
-function sniffImageFormat(bytes: Uint8Array): string | null {
+export function sniffImageFormat(bytes: Uint8Array): string | null {
   if (
     bytes.length >= 4 &&
     bytes[0] === 0x89 &&
@@ -63,6 +87,7 @@ function sniffImageFormat(bytes: Uint8Array): string | null {
     ascii(bytes, 4, 8) === "JXL "
   )
     return "jxl";
+  if (isSvgBytes(bytes)) return "svg";
   return null;
 }
 
@@ -70,14 +95,18 @@ function sniffImageFormat(bytes: Uint8Array): string | null {
  * Whether `value` is image input.
  *
  * - Binary (`Uint8Array` / `ArrayBuffer`): magic-byte sniffing for
- *   PNG/JPEG/WebP/GIF/AVIF/JXL/BMP. Unknown magic throws.
- * - `string`: `data:image/` prefix means image input; anything else is HTML.
+ *   PNG/JPEG/WebP/GIF/AVIF/JXL/BMP/SVG. Unknown magic throws.
+ * - `string`: `data:image/` prefix or `<svg` element means image input; anything else is HTML.
  * - `string[]` (HTML vector) / `undefined`: not image input.
  */
 export function isImageInput(value: unknown): boolean {
   if (value === undefined || value === null || Array.isArray(value))
     return false;
-  if (typeof value === "string") return value.startsWith("data:image/");
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/")) return true;
+    if (isSvgString(value)) return true;
+    return false;
+  }
   const bytes =
     value instanceof Uint8Array || value instanceof ArrayBuffer
       ? toBytes(value)
@@ -109,11 +138,14 @@ export function dataUrlToBytes(s: string): Uint8Array {
   return new TextEncoder().encode(decodeURIComponent(body));
 }
 
-/** Normalize image input to raw bytes (data URLs are decoded). */
+/** Normalize image input to raw bytes (data URLs are decoded, SVG strings encoded to UTF-8). */
 export function imageInputToBytes(
   value: string | Uint8Array | ArrayBuffer,
 ): Uint8Array {
-  if (typeof value === "string") return dataUrlToBytes(value);
+  if (typeof value === "string") {
+    if (value.startsWith("data:")) return dataUrlToBytes(value);
+    return new TextEncoder().encode(value);
+  }
   return toBytes(value);
 }
 

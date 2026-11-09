@@ -43,8 +43,25 @@ jobs:
           pnpm build:js
           pnpm --filter playground build
 
+      # the Release workflow publishes these once this run has passed, instead of building them again
+      - name: Keep the packages to publish
+        if: github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: |
+            packages/html-to-image/dist
+            packages/quickjs-dom/dist
+          retention-days: 7
+          if-no-files-found: error
+
       - name: Run Unit Tests
         run: pnpm test
+
+      # Notation variants against the official Mermaid parser: fails on a gap or structure difference that is not in
+      # packages/mermaid-compare/scripts/notation-known-gaps.json
+      - name: Mermaid Notation Differential Test
+        run: pnpm --filter mermaid-compare notation-diff
 
       - name: Cache Playwright Browsers
         id: playwright-cache

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Theme colour parity</title>
+    <style>
+      body { font: 13px/1.4 system-ui, sans-serif; margin: 16px; background: #0f172a; color: #e2e8f0; }
+      table { border-collapse: collapse; margin: 8px 0 24px; }
+      td, th { border: 1px solid #334155; padding: 2px 8px; text-align: left; }
+      .sw { display: inline-block; width: 14px; height: 14px; border: 1px solid #64748b; vertical-align: -2px; margin-right: 4px; }
+      .bad { color: #fca5a5; } .ok { color: #86efac; }
+      h2 { margin: 16px 0 0; font-size: 15px; }
+    </style>
+  </head>
+  <body>
+    <p id="status">running…</p>
+    <div id="out"></div>
+    <script type="module" src="/src/parity.ts"></script>
+  </body>
+</html>

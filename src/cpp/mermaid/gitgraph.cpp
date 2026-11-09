@@ -174,7 +174,7 @@ bool render_gitgraph(const std::string& source, const Options& options, std::str
     for (size_t b = 0; b < branches.size(); b++) {
         double y = Y((int)b);
         std::string color = kColors[b % 8];
-        lanes += "<line x1=\"" + num(left) + "\" y1=\"" + num(y) + "\" x2=\"" + num(W - kMargin / 2) + "\" y2=\"" + num(y) + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\" stroke-dasharray=\"4 4\"/>\n";
+        lanes += dashed_line(left, y, W - kMargin / 2, y, th.inner_stroke, 1, "4 4");
         double pw = text.width(branches[b].name, 12, 600) + 20;
         lanes += "<g class=\"branch\">\n<rect x=\"" + num(kMargin) + "\" y=\"" + num(y - 13) + "\" width=\"" + num(pw) + "\" height=\"26\" rx=\"13\" fill=\"" + color + "\"/>\n";
         centered_text(lanes, th, {branches[b].name}, kMargin + pw / 2, y, 12, 600, "#ffffff");

@@ -45,6 +45,17 @@ bool render_packet(const std::string& source, const Options& options, std::strin
         }
         std::string range = trim(line.substr(0, colon)), label = trim(line.substr(colon + 1));
         if (label.size() >= 2 && label.front() == '"' && label.back() == '"') label = label.substr(1, label.size() - 2);
+        if (!range.empty() && range[0] == '+') {  // `+16: "label"`: the next 16 bits
+            char* end;
+            long width = std::strtol(range.c_str() + 1, &end, 10);
+            if (end == range.c_str() + 1 || *end != 0 || width < 1) {
+                error = "`+n` takes a number of bits above zero: " + line;
+                return false;
+            }
+            int from = fields.empty() ? 0 : fields.back().end + 1;
+            fields.push_back({from, from + (int)width - 1, label});
+            continue;
+        }
         size_t dash = range.find('-');
         char *e1, *e2;
         long a = std::strtol(range.c_str(), &e1, 10), b = dash == std::string::npos ? a : std::strtol(range.c_str() + dash + 1, &e2, 10);
@@ -84,14 +95,8 @@ bool render_packet(const std::string& source, const Options& options, std::strin
             double x = left + (a % kBits) * kBitW, w = (b - a + 1) * kBitW, y = top + row * (kRowH + kNumH) + kNumH;
             body += "<g class=\"field\">\n<rect x=\"" + num(x) + "\" y=\"" + num(y) + "\" width=\"" + num(w) + "\" height=\"" + num(kRowH) + "\" fill=\"" + mix(kTints[f % 6], th.bg, 18) + "\" stroke=\"" +
                     kTints[f % 6] + "\" stroke-width=\"1\"/>\n";
-            std::string label = fields[f].label;
-            while (label.size() > 1 && text.width(label, 12, 500) > w - 6) {
-                size_t cut = label.size() - 1;
-                while (cut > 0 && ((unsigned char)label[cut] & 0xC0) == 0x80) cut--;  // never in the middle of a UTF-8 character
-                label.resize(cut);
-            }
-            if (label.size() < fields[f].label.size() && label.size() > 1) label += "…";
-            centered_text(body, th, {label}, x + w / 2, y + kRowH / 2, 12, 500, th.text);
+            // the label is drawn whole, as Mermaid draws it: a field too narrow for it lets it spill, not truncate
+            centered_text(body, th, {fields[f].label}, x + w / 2, y + kRowH / 2, 12, 500, th.text);
             body += "</g>\n";
             // the first and last bit number of this piece
             aligned_text(body, th, {std::to_string(a)}, x + 1, y - 8, 9.5, 400, th.text_sec, "start");

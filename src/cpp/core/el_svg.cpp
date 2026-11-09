@@ -1,4 +1,5 @@
 #include "el_svg.h"
+#include "svg_builder_config.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -202,7 +203,7 @@ class SatoruResourceProvider : public skresources::ResourceProvider {
 }  // namespace
 
 el_svg::el_svg(const std::shared_ptr<document>& doc) : html_tag(doc) {
-    m_css.set_display(display_inline_block);
+    (*m_cssp).set_display(display_inline_block);
 }
 el_svg::~el_svg() {}
 
@@ -669,6 +670,15 @@ std::string el_svg::reconstruct_xml(int x, int y, int width, int height) const {
     return ss.str();
 }
 
+void configure_svg_builder(SkSVGDOM::Builder& builder, SatoruContext& context) {
+    auto resource_provider = sk_make_sp<SatoruResourceProvider>(context.imageCache);
+    builder.setResourceProvider(skresources::DataURIResourceProviderProxy::Make(
+        resource_provider, skresources::ImageDecodeStrategy::kPreDecode));
+    builder.setTextShapingFactory(
+        sk_make_sp<SatoruSvgShaperFactory>(context.getUnicodeService().getSkUnicodeSp()));
+    builder.setFontManager(sk_make_sp<SatoruSvgFontMgr>(context, context.fontManager.getFontMgr()));
+}
+
 // Draw finished SVG XML (absolute position when tagging) at pos; shared with el_mermaid.
 void draw_svg_xml(container_skia* container, const std::string& xml, const position& pos) {
     SkCanvas* canvas = container->get_canvas();
@@ -688,11 +698,8 @@ void draw_svg_xml(container_skia* container, const std::string& xml, const posit
 
         SkSVGDOM::Builder builder;
         builder.setResourceProvider(proxy_rp);
-        builder.setTextShapingFactory(
-            sk_make_sp<SatoruSvgShaperFactory>(container->get_context().getUnicodeService().getSkUnicodeSp()));
         // Without a font manager SkSVGText draws nothing at all.
-        builder.setFontManager(sk_make_sp<SatoruSvgFontMgr>(
-            container->get_context(), container->get_context().fontManager.getFontMgr()));
+        configure_svg_builder(builder, container->get_context());
         auto svg_dom = builder.make(stream);
 
         if (svg_dom) {

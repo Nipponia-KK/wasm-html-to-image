@@ -6,7 +6,7 @@
 
 litehtml::el_image::el_image(const document::ptr& doc) : html_tag(doc)
 {
-	m_css.set_display(display_inline_block);
+	(*m_cssp).set_display(display_inline_block);
 }
 
 void litehtml::el_image::get_content_size( size& sz, pixel_t /*max_width*/ )
@@ -24,6 +24,15 @@ bool litehtml::el_image::is_ratio_only_replaced() const
 	// An <img> whose source is an SVG with a viewBox but no intrinsic size:
 	// only the ratio is intrinsic, exactly like an inline <svg> (el_svg).
 	return get_document()->container()->get_image_ratio_only(m_src.c_str(), nullptr);
+}
+
+bool litehtml::el_image::is_no_ratio_replaced() const
+{
+	// An <img> whose source is an SVG with neither absolute dimensions nor
+	// a viewBox: no intrinsic size and no intrinsic ratio; each axis falls
+	// back to its own default object size (300 / 150) instead of a
+	// transferred size.
+	return get_document()->container()->get_image_no_ratio(m_src.c_str(), nullptr);
 }
 
 namespace {

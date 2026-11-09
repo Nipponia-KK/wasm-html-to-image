@@ -47,6 +47,7 @@ struct SatoruRenderOptions {
     // PDF Templates
     std::string pdfHeader;
     std::string pdfFooter;
+    int pdfSkipRunning = 0;  // leading pages printed without header and footer
 };
 
 #endif  // HTML_TO_IMAGE_SATORU_OPTIONS_H

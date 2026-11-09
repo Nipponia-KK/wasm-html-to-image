@@ -1,5 +1,6 @@
 import { marked, Marked } from "marked";
 import { mathExtension, type MathRenderer } from "./markdown-math-syntax.js";
+import { calloutHtml, createFootnotes, figureLabel, pagebreakHtml } from "./markdown-blocks.js";
 import {
   DEFAULT_PAGE,
   DEFAULT_TYPE,
@@ -62,7 +63,7 @@ highlighter.registerAliases(["toml"], { languageName: "ini" });
 
 /** Options for {@link markdownToHtml}. */
 // The template API lives beside the converter: `import { listTemplates, type MarkdownTemplate } from ".../markdown"`.
-export { listTemplates, TEMPLATES } from "./markdown-template.js";
+export { defineTemplate, listTemplates, TEMPLATES } from "./markdown-template.js";
 export type { DocumentSettings, MarkdownTemplate, TemplatePage, TemplateType } from "./markdown-template.js";
 
 export interface MarkdownOptions {
@@ -84,8 +85,8 @@ export interface MarkdownOptions {
   /** Highlight fenced code blocks that name a known language. Defaults to true. */
   highlight?: boolean;
   /**
-   * Draw ```` ```mermaid ```` fences as diagrams (flowchart, sequence, state, class, ER and xy charts, drawn by the engine
-   * itself). Defaults to true; `false` leaves them as code blocks.
+   * Draw ```` ```mermaid ```` fences as diagrams (over 30 kinds, drawn by the engine itself). Defaults to true; `false`
+   * leaves them as code blocks.
    */
   mermaid?: boolean;
   /** Strip a leading `---` YAML front matter block (and read its `title`). Defaults to true. */
@@ -192,8 +193,12 @@ export function markdownStylesheet(
   type: TemplateType = DEFAULT_TYPE,
   accent?: string,
   page?: { size?: string; margin: string },
+  mermaid: { theme?: string; mode?: string; directives?: boolean } = {},
 ): string {
   const c = { ...PALETTES[theme], ...(accent ? { link: accent } : {}) };
+  // a named Mermaid theme brings its own colours, so the document's are left out of the diagram's variables
+  const mermaidTheme = mermaid.theme && /^[a-z][a-z-]*$/.test(mermaid.theme) ? mermaid.theme : undefined;
+  const mermaidMode = mermaid.mode === "compat" || mermaid.mode === "recover" ? mermaid.mode : undefined;
   const head = type.headingFont ?? type.font;
   const headColor = type.accentHeadings && accent ? accent : c.fg;
   const pageRule = page
@@ -201,7 +206,7 @@ export function markdownStylesheet(
     : paged
       ? `@page { margin: ${padding}px; }\n`
       : "";
-  return `${pageRule}:root { --accent: ${accent ?? c.link}; }
+  return `${pageRule}:root { --accent: ${accent ?? c.link}; --surface: ${c.codeBg}; --border: ${c.border}; --muted: ${c.muted}; --text: ${c.fg}; --page: ${c.bg}; }
 html, body { margin: 0; padding: 0; background: ${c.bg}; }
 body { color: ${c.fg}; font-family: ${type.font}; font-size: ${type.size}px; line-height: ${type.lineHeight};${type.justify ? " text-align: justify;" : ""} }
 .markdown-body { padding: ${paged ? 0 : padding}px;${maxWidth ? ` max-width: ${maxWidth}px; margin: 0 auto;` : ""} }
@@ -220,18 +225,38 @@ body { color: ${c.fg}; font-family: ${type.font}; font-size: ${type.size}px; lin
 .markdown-body li > ul, .markdown-body li > ol { margin-top: 0.25em; margin-bottom: 0; }
 .markdown-body a { color: ${c.link}; text-decoration: none; }
 .markdown-body strong { font-weight: 600; }
-.markdown-body blockquote { padding: 0 1em; color: ${c.quote}; border-left: 4px solid ${c.border}; }
+.markdown-body blockquote { margin-left: 0; margin-right: 0; padding: 0 1em; color: ${c.quote}; border-left: 4px solid ${c.border}; }
 .markdown-body blockquote > *:last-child { margin-bottom: 0; }
 .markdown-body code { padding: 0.2em 0.4em; font-family: ${type.mono}; font-size: 85%; background: ${c.codeBg}; border-radius: ${type.radius}px; }
-.markdown-body pre { padding: 16px; overflow: hidden; font-size: 85%; line-height: 1.45; background: ${c.codeBg}; border-radius: ${type.radius}px; text-align: left; }
+.markdown-body pre { padding: 16px; overflow: hidden; white-space: pre-wrap; word-break: break-all; font-size: 85%; line-height: 1.45; background: ${c.codeBg}; border-radius: ${type.radius}px; text-align: left; }
 .markdown-body .diagram { margin: 0 0 16px; text-align: center; }
-.markdown-body .mermaid { display: inline-block; margin: 0; color: ${c.fg}; --mermaid-fg: ${c.fg}; --mermaid-bg: ${c.bg}; --mermaid-border: ${c.border}; --mermaid-surface: ${c.codeBg}; }
-.markdown-body pre code { padding: 0; font-size: 100%; background: transparent; white-space: pre; }
+.markdown-body .mermaid { display: inline-block; margin: 0; color: ${c.fg};${mermaidTheme ? ` --mermaid-theme: ${mermaidTheme};` : ` --mermaid-fg: ${c.fg}; --mermaid-bg: ${c.bg}; --mermaid-border: ${c.border}; --mermaid-surface: ${c.codeBg};`}${mermaidMode ? ` --mermaid-mode: ${mermaidMode};` : ""}${mermaid.directives ? " --mermaid-directives: on;" : ""} }
+.markdown-body pre code { padding: 0; font-size: 100%; background: transparent; white-space: pre-wrap; word-break: break-all; }
+.markdown-body .hnum { margin-right: 0.4em; }
+.markdown-body .callout { margin: 0 0 16px; padding: 10px 16px; border-left: 4px solid ${c.link}; background: ${c.codeBg}; break-inside: avoid; }
+.markdown-body .callout > *:last-child { margin-bottom: 0; }
+.markdown-body .callout-title { margin: 0 0 4px; font-weight: 700; color: ${c.link}; }
+.markdown-body .callout-tip { border-left-color: #16a34a; }
+.markdown-body .callout-tip .callout-title { color: #16a34a; }
+.markdown-body .callout-important { border-left-color: #8b5cf6; }
+.markdown-body .callout-important .callout-title { color: #8b5cf6; }
+.markdown-body .callout-warning { border-left-color: #d97706; }
+.markdown-body .callout-warning .callout-title { color: #d97706; }
+.markdown-body .callout-caution { border-left-color: #dc2626; }
+.markdown-body .callout-caution .callout-title { color: #dc2626; }
+.markdown-body .figure { margin: 0 0 16px; text-align: center; break-inside: avoid; }
+.markdown-body .figure img { max-width: 100%; }
+.markdown-body figcaption { margin-top: 6px; font-size: 0.9em; color: ${c.muted}; }
+.markdown-body .pagebreak { height: 1px; margin: 0; break-after: page; }
+.markdown-body .fnref { font-size: 0.75em; line-height: 0; }
+.markdown-body .footnotes { margin-top: 32px; padding-top: 8px; border-top: 1px solid ${c.border}; font-size: 0.9em; color: ${c.muted}; }
+.markdown-body .footnotes-title { margin: 0 0 4px; font-weight: 600; }
+.markdown-body .footnotes ol { margin: 0; }
 .markdown-body hr { height: 0; margin: 24px 0; border: 0; border-top: 4px solid ${c.border}; }
 .markdown-body img { max-width: 100%; }
-.markdown-body table { border-collapse: collapse; }
+.markdown-body table { border-collapse: collapse;${type.wideTables ? " width: 100%;" : ""} }
 .markdown-body th, .markdown-body td { padding: 6px 13px; border: 1px solid ${c.border}; }
-.markdown-body th { font-weight: 600; }
+.markdown-body th { font-weight: 600;${type.wideTables ? " white-space: nowrap;" : ""} }
 .markdown-body tr:nth-child(2n) { background: ${c.codeBg}; }
 .markdown-body input[type="checkbox"] { margin: 0 0.4em 0 -1.4em; }
 .hljs-keyword, .hljs-doctag, .hljs-template-tag, .hljs-type, .hljs-meta { color: ${c.keyword}; }
@@ -269,7 +294,8 @@ function coverHtml(settings: DocumentSettings): string {
       ? `<p class="cover-meta">${settings.author ? `<span class="cover-author">${escapeHtml(settings.author)}</span>` : ""}${settings.date ? `<span class="cover-date">${escapeHtml(settings.date)}</span>` : ""}</p>`
       : "",
   ];
-  return `<header class="cover">${parts.join("")}</header>
+  const style = settings.cover_style && /^(band|plain|center)$/.test(settings.cover_style) ? ` cover-${settings.cover_style}` : "";
+  return `<header class="cover${style}">${parts.join("")}</header>
 `;
 }
 
@@ -277,9 +303,12 @@ function coverHtml(settings: DocumentSettings): string {
 const COVER_CSS = `.cover { margin: 40mm 0 0; break-after: page; }
 .cover-logo { display: block; max-height: 22mm; max-width: 60mm; margin-bottom: 14mm; }
 .cover-title { margin: 0; font-size: 2.6em; font-weight: 700; line-height: 1.25; }
-.cover-subtitle { margin: 0.6em 0 0; font-size: 1.25em; color: #6b7280; }
-.cover-meta { margin: 3em 0 0; color: #6b7280; }
+.cover-subtitle { margin: 0.6em 0 0; font-size: 1.25em; color: var(--muted, #6b7280); }
+.cover-meta { margin: 3em 0 0; color: var(--muted, #6b7280); }
 .cover-meta span + span { margin-left: 1.5em; }
+.cover.cover-plain { padding: 0; border: 0; }
+.cover.cover-center { padding: 0; border: 0; text-align: center; }
+.cover.cover-band { padding-left: 14px; border-left: 6px solid var(--accent, #1d4ed8); text-align: left; }
 `;
 
 /**
@@ -317,6 +346,8 @@ export interface MarkdownRenderOptions {
   pdfBackground?: string;
   pdfHeader?: string;
   pdfFooter?: string;
+  /** The cover page is printed without header and footer (its number is still counted). */
+  pdfSkipRunning?: number;
   pdfTitle?: string;
   pdfAuthor?: string;
 }
@@ -362,12 +393,18 @@ export function markdownToDocument(markdown: string, options: MarkdownOptions = 
   // Every heading gets an id (a link target, and what the table of contents points at).
   const entries: TocEntry[] = [];
   const usedIds = new Map<string, number>();
+  const counters = [0, 0, 0, 0, 0, 0];
   renderer.heading = function ({ tokens, depth, text }) {
     const base = slugify(text);
     const seen = usedIds.get(base) ?? 0;
     usedIds.set(base, seen + 1);
     const id = seen === 0 ? base : `${base}-${seen + 1}`;
-    const inner = this.parser.parseInline(tokens);
+    let inner = this.parser.parseInline(tokens);
+    if (settings.numbering) {
+      counters[depth - 1]++;
+      for (let k = depth; k < 6; k++) counters[k] = 0;
+      inner = `<span class="hnum">${counters.slice(0, depth).map((n) => n || 1).join(".")}</span> ${inner}`;
+    }
     entries.push({ level: depth, id, html: inner });
     return `<h${depth} id="${id}">${inner}</h${depth}>\n`;
   };
@@ -379,27 +416,66 @@ export function markdownToDocument(markdown: string, options: MarkdownOptions = 
       : escapeHtml(text);
     return `<pre><code${name ? ` class="language-${escapeHtml(name)}"` : ""}>${body}\n</code></pre>\n`;
   };
-  const parser = options.math ? new Marked(mathExtension(options.math)) : marked;
-  const text = parser.parse(source, { async: false, gfm: true, renderer }) as string;
+  // Call-out boxes (`> [!NOTE]`), numbered figures, page breaks and footnotes.
+  renderer.blockquote = function ({ tokens }) {
+    const body = this.parser.parse(tokens);
+    return calloutHtml(body, settings.lang) ?? `<blockquote>
+${body}</blockquote>
+`;
+  };
+  let figures = 0;
+  const defaultParagraph = renderer.paragraph.bind(renderer);
+  renderer.paragraph = function (token) {
+    const only = token.tokens.length === 1 ? token.tokens[0] : undefined;
+    if (only?.type === "image" && only.title) {
+      figures++;
+      return `<figure class="figure">${this.parser.parseInline(token.tokens).replace(/ title="[^"]*"/, "")}<figcaption>${figureLabel(figures, settings.lang)}　${escapeHtml(only.title)}</figcaption></figure>
+`;
+    }
+    return defaultParagraph(token);
+  };
+  renderer.html = ({ text: raw }) => pagebreakHtml(raw) ?? raw;
+  const footnotes = createFootnotes();
+  source = footnotes.extract(source);
+  const parser = new Marked(footnotes.extension, options.math ? mathExtension(options.math) : {});
+  const text =
+    (parser.parse(source, { async: false, gfm: true, renderer }) as string) +
+    footnotes.list((t) => parser.parseInline(t, { async: false, gfm: true }) as string, settings.lang?.toLowerCase().startsWith("ja") ? "脚注" : "Notes", !!options.paged && settings.footnotes === "page");
 
   const tocOption = options.toc ?? (front.toc !== undefined || template.defaults?.toc !== undefined ? settings.toc : !!options.paged);
-  const toc = tocOption === true && typeof options.toc === "object" ? options.toc : tocOption;
+  const tocExtras = { ...(settings.toc_depth ? { depth: settings.toc_depth } : {}), ...(settings.toc_title ? { title: settings.toc_title } : {}) };
+  const toc = tocOption === true && typeof options.toc === "object" ? options.toc : tocOption === true && Object.keys(tocExtras).length ? tocExtras : tocOption;
   const tocBlock = toc && entries.length ? tocHtml(entries, toc === true ? {} : toc) : "";
   const cover = settings.cover && settings.title ? coverHtml(settings) : "";
   const body = cover + tocBlock + text;
 
   const type = { ...DEFAULT_TYPE, ...template.type, ...(settings.font ? { font: settings.font } : {}) };
-  const page = { ...DEFAULT_PAGE, ...template.page };
-  const hasTemplate = options.template !== undefined || front.template !== undefined;
+  const page = {
+    ...DEFAULT_PAGE,
+    ...template.page,
+    ...(settings.margin ? { margin: settings.margin } : {}),
+    ...(settings.header !== undefined ? { header: settings.header } : {}),
+    ...(settings.footer !== undefined ? { footer: settings.footer } : {}),
+  };
+  // Asking for a page of its own (a header, a footer, a margin or an orientation) makes the document paged like a template does.
+  const hasTemplate =
+    options.template !== undefined ||
+    front.template !== undefined ||
+    [settings.header, settings.footer, settings.margin, settings.orientation].some((v) => v !== undefined);
+  const withOrientation = (size: string) => (settings.orientation === "landscape" && !/\blandscape\b/.test(size) ? `${size} landscape` : size);
   // A plain document keeps the exact page it always had; a template adds its own @page (size and margins).
   const pageSetting = hasTemplate && options.paged !== false
-    ? { size: settings.page_size ?? page.size, margin: page.margin }
+    ? { size: withOrientation(settings.page_size ?? page.size), margin: page.margin }
     : settings.page_size && options.paged
-      ? { size: settings.page_size, margin: `${options.padding ?? 32}px` }
+      ? { size: withOrientation(settings.page_size), margin: `${options.padding ?? 32}px` }
       : undefined;
   const sheet =
     options.stylesheet ??
-    markdownStylesheet(options.theme, options.padding, options.maxWidth, options.paged, type, settings.accent, pageSetting);
+    markdownStylesheet(options.theme, options.padding, options.maxWidth, options.paged, type, settings.accent, pageSetting, {
+      theme: settings.mermaid_theme,
+      mode: settings.mermaid_mode,
+      directives: settings.mermaid_directives,
+    });
 
   const titleText = settings.title;
   const title = titleText ? `<title>${escapeHtml(titleText)}</title>` : "";
@@ -418,6 +494,7 @@ export function markdownToDocument(markdown: string, options: MarkdownOptions = 
       ...(options.paged && options.theme === "dark" && options.stylesheet === undefined ? { pdfBackground: PALETTES.dark.bg } : {}),
       ...(header ? { pdfHeader: header } : {}),
       ...(hasTemplate && page.footer ? { pdfFooter: running(page.footer) } : {}),
+      ...(cover && hasTemplate && (header || page.footer) ? { pdfSkipRunning: 1 } : {}),
       ...(settings.title ? { pdfTitle: settings.title.replace(/<br\s*\/?>/gi, " ") } : {}),
       ...(settings.author ? { pdfAuthor: settings.author } : {}),
     },

@@ -109,6 +109,9 @@ void parse_satoru_options(SatoruRenderOptions& options, val options_val) {
     if (options_val.hasOwnProperty("pdfHeader")) {
         options.pdfHeader = options_val["pdfHeader"].as<std::string>();
     }
+    if (options_val.hasOwnProperty("pdfSkipRunning")) {
+        options.pdfSkipRunning = options_val["pdfSkipRunning"].as<int>();
+    }
     if (options_val.hasOwnProperty("pdfFooter")) {
         options.pdfFooter = options_val["pdfFooter"].as<std::string>();
     }
@@ -145,10 +148,41 @@ val satoru_render_val(SatoruInstance* inst, val htmls, int width, int height, in
 // JSオブジェクト {family: url} 受けのvalラッパ経由で登録する。
 // Debug: every element's border box as JSON (see api/layout_json.h). `htmls` is one page.
 std::string satoru_layout_json_val(SatoruInstance* inst, val htmls, int width, int height,
-                                   int mediaType) {
+                                   int mediaType, bool includeInline) {
     std::vector<std::string> pages = val_to_html_vector(htmls);
     if (!inst || pages.empty()) return "[]";
-    return satoru_api_layout_json(inst, pages[0], width, height, mediaType);
+    return satoru_api_layout_json(inst, pages[0], width, height, mediaType, includeInline);
+}
+
+// Same walk with the computed (used) style of every element: `"s":{display,position,color,...}` (see api/layout_json.cpp).
+std::string satoru_layout_style_json_val(SatoruInstance* inst, val htmls, int width, int height,
+                                         int mediaType, bool includeInline) {
+    std::vector<std::string> pages = val_to_html_vector(htmls);
+    if (!inst || pages.empty()) return "[]";
+    return satoru_api_layout_json(inst, pages[0], width, height, mediaType, includeInline, true);
+}
+
+// P0 probe: restyle + relayout the document the last layout call left behind; see document::live_probe.
+std::string satoru_live_probe_val(SatoruInstance* inst, int width, int mode) {
+    if (!inst || !inst->doc) return "{}";
+    auto t = inst->doc->live_probe((litehtml::pixel_t)normalize_viewport_width(width), mode);
+    char buf[200];
+    snprintf(buf, sizeof(buf), "{\"clear\":%.2f,\"apply\":%.2f,\"compute\":%.2f,\"tree\":%.2f,\"layout\":%.2f}", t.clear, t.apply, t.compute, t.tree, t.layout);
+    return buf;
+}
+
+// Live layout: open a document, apply attribute ops to it ("ok" or "rebuild"), read the boxes of the document held now.
+void satoru_live_open_val(SatoruInstance* inst, std::string html, int width, int mediaType) {
+    satoru_api_live_open(inst, html, width, mediaType);
+}
+std::string satoru_live_apply_val(SatoruInstance* inst, std::string ops, int width) {
+    return satoru_api_live_apply(inst, ops, normalize_viewport_width(width)) ? "ok" : "rebuild";
+}
+std::string satoru_live_sync_val(SatoruInstance* inst, bool delta) {
+    return satoru_api_live_boxes(inst, delta);
+}
+std::string satoru_live_boxes_val(SatoruInstance* inst) {
+    return satoru_api_layout_json_current(inst, true, true);
 }
 
 void satoru_set_font_map_val(SatoruInstance* inst, val fontMap) {

@@ -656,7 +656,8 @@ namespace litehtml
                                    min_height == val.min_height &&
                                    max_height == val.max_height &&
                                    context_idx == val.context_idx &&
-                                   size_mode == val.size_mode;
+                                   size_mode == val.size_mode &&
+                                   height_cyclic == val.height_cyclic;
                 }
 
                 bool operator!=(const containing_block_context& val) const

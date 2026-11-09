@@ -17,6 +17,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     include(CTest)
 endif()
 
+if(MSVC)
+    # the sources are UTF-8; without this MSVC reads them as code page 932 and a Japanese comment can swallow the line break
+    add_compile_options(/utf-8)
+endif()
+
 add_executable(test_string_utils test_string_utils.cpp)
 # string_utils.h は標準ライブラリのみのため、src/cpp を -I にするだけでホストコンパイル可
 target_include_directories(test_string_utils PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp")
@@ -73,12 +78,15 @@ add_library(mermaid_core STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/c4.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/venn.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/ishikawa.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/treeview.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/treeview.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/swimlane.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/usecase.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/eventmodeling.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/railroad.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/cynefin.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp/mermaid/wardley.cpp")
 target_include_directories(mermaid_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/../../src/cpp")
 target_compile_features(mermaid_core PUBLIC cxx_std_20)
-if(MSVC)
-    target_compile_options(mermaid_core PRIVATE /utf-8)
-endif()
 
 add_executable(mermaid_cli mermaid_cli.cpp)
 target_link_libraries(mermaid_cli PRIVATE mermaid_core)

@@ -481,10 +481,20 @@ namespace litehtml
       add_parsed_property(name, property_value(length, important, false, m_layer, m_specificity));
   }
 
-  void style::add_property(string_id name, const css_token_vector &value, const string &baseurl, bool important, document_container *container, int layer, selector_specificity specificity)
+  void style::add_property(string_id name, const css_token_vector &value, const string &baseurl, bool important, document_container *container, int layer, selector_specificity specificity, int order)
   {
     m_layer = layer;
     m_specificity = specificity;
+    // When re-parsing a var() declaration (style::subst_vars), pin every
+    // resulting property to the declaration's original cascade position so
+    // the re-parse competes with the other declarations by source order
+    // rather than by re-parse order. Restored on scope exit.
+    struct forced_order_guard {
+      style* s;
+      int prev;
+      ~forced_order_guard() { s->m_forced_order = prev; }
+    } guard{this, m_forced_order};
+    if (order >= 0) m_forced_order = order;
     if (value.empty() && _s(name).substr(0, 2) != "--")
       return;
 
@@ -493,7 +503,7 @@ namespace litehtml
     evaluate_light_dark(evaluated_value, container);
 
     if (has_var(evaluated_value))
-      return add_parsed_property(name, property_value(evaluated_value, important, true, m_layer, m_specificity));
+      return add_parsed_property(name, property_value(evaluated_value, important, true, m_layer, m_specificity, order));
 
     css_token val = evaluated_value.size() == 1 ? evaluated_value[0] : css_token();
     string ident = val.ident();
@@ -3258,8 +3268,17 @@ namespace litehtml
                           property_value(tokens, important, false, m_layer, m_specificity));
   }
 
-  void style::add_parsed_property(string_id name, const property_value &propval)
+  void style::add_parsed_property(string_id name, const property_value &propval_in)
   {
+    property_value propval = propval_in;
+    // Stamp the declaration's cascade position unless the caller pinned it
+    // (combine stamps in application order; subst_vars preserves the stamp
+    // of the declaration being re-parsed so a var() shorthand's expansion
+    // cannot overwrite a later declaration it legitimately loses to).
+    if (m_forced_order >= 0)
+      propval.m_priority.order = m_forced_order;
+    else if (propval.m_priority.order < 0)
+      propval.m_priority.order = ++m_order_counter;
     for (auto &prop : m_properties)
     {
       if (prop.first == name)
@@ -3298,6 +3317,11 @@ namespace litehtml
         {
             val.m_priority.specificity = specificity;
         }
+        // Rules are combined in cascade order (apply_stylesheet sorts the
+        // matched selectors), so stamp each property with its position in
+        // that order: between declarations of equal importance, layer and
+        // specificity the later one wins, as in CSS.
+        val.m_priority.order = ++m_order_counter;
         add_parsed_property(property.first, val);
     }
   }
@@ -3555,30 +3579,18 @@ namespace litehtml
   void style::subst_vars(const html_tag *el)
   {
     auto properties = m_properties;
-    bool had_var_shorthand = false;
     for (auto &prop : properties)
     {
       if (prop.second.m_has_var)
       {
         auto &value = prop.second.get<css_token_vector>();
         subst_vars_(prop.first, value, el);
-        add_property(prop.first, value, "", prop.second.m_priority.important, el->get_document()->container(), prop.second.m_priority.layer_rank, prop.second.m_priority.specificity);
-        // Check if this was a shorthand that expands to sub-properties
-        if (!at(shorthands, prop.first).empty())
-          had_var_shorthand = true;
-      }
-    }
-    // If a shorthand with var() was re-parsed, it may have overwritten
-    // individual (non-var) sub-properties that appeared after it in the source.
-    // Re-apply those non-var properties to restore the correct cascade order.
-    if (had_var_shorthand)
-    {
-      for (auto &prop : properties)
-      {
-        if (!prop.second.m_has_var && !prop.second.is<invalid>())
-        {
-          add_parsed_property(prop.first, prop.second);
-        }
+        // Re-parse with the declaration's own cascade stamp: a var()
+        // shorthand expands to longhands carrying the shorthand's position,
+        // so it overwrites earlier declarations it beats and leaves later
+        // ones (which add_parsed_property would previously have clobbered,
+        // as they sit earlier in the properties vector) untouched.
+        add_property(prop.first, value, "", prop.second.m_priority.important, el->get_document()->container(), prop.second.m_priority.layer_rank, prop.second.m_priority.specificity, prop.second.m_priority.order);
       }
     }
   }

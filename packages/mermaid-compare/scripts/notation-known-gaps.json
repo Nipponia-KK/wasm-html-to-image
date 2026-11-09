@@ -1,0 +1,16 @@
+{
+  "official accepts, engine rejects (reason)": {
+    "class note": "a class diagram of nothing but a `note for` has no class to draw",
+    "c4 args": "Rel to an element that is never declared; official fails when it draws it"
+  },
+  "structure differs (reason)": {
+    "state label a;b": "official ends a statement at `;` and makes a state of the rest; the engine keeps it as text",
+    "state desc a;b": "same as above",
+    "state composite": "official counts a composite's inner states and transitions apart from the outer ones",
+    "class lollipop": "official draws the lollipop as part of the class; the engine draws a plain line to a second class",
+    "class lollipop2": "same as above",
+    "state note": "the engine draws a note as a node joined to its state; official keeps notes out of its nodes and edges",
+    "state note block": "same as above",
+    "class note": "same as above: official counts no node for a `note for` with no class, the engine draws the note"
+  }
+}

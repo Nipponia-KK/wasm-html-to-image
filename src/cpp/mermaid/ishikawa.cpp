@@ -35,15 +35,15 @@ bool render_ishikawa(const std::string& source, const Options& options, std::str
         return false;
     }
     const TreeNode& effect = *tree.kids[0];
-    if (tree.kids.size() > 1) {
-        error = "only one effect (the first line) is allowed: " + tree.kids[1]->text;
-        return false;
-    }
+    // the first line is the effect; the lines at its own indent that follow are categories too
+    std::vector<const TreeNode*> categories;
+    for (auto& c : effect.kids) categories.push_back(c.get());
+    for (size_t k = 1; k < tree.kids.size(); k++) categories.push_back(tree.kids[k].get());
     Theme th = make_theme(options);
     Text text{options};
     const double kRow = 21, kSlant = 44, margin = 24, kFont = 12, kHead = 15;
     std::vector<Bone> bones;
-    for (auto& c : effect.kids) {
+    for (const TreeNode* c : categories) {
         Bone b;
         b.label = c->text;
         flatten(*c, 0, b.rows);

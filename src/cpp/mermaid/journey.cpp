@@ -113,7 +113,7 @@ bool render_journey(const std::string& source, const Options& options, std::stri
     // the plot: a faint line per score, the path through the faces, then the tasks
     for (int l = 0; l < 5; l++) {
         double y = plot_y + l * kLevel;
-        body += "<line x1=\"" + num(left) + "\" y1=\"" + num(y + kLevel / 2) + "\" x2=\"" + num(W - kMargin) + "\" y2=\"" + num(y + kLevel / 2) + "\" stroke=\"" + th.inner_stroke + "\" stroke-width=\"1\" stroke-dasharray=\"3 4\"/>\n";
+        body += dashed_line(left, y + kLevel / 2, W - kMargin, y + kLevel / 2, th.inner_stroke, 1, "3 4");
     }
     std::string path;
     for (size_t k = 0; k < tasks.size(); k++) {

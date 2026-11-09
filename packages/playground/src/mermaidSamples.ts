@@ -360,6 +360,190 @@ export const MERMAID_SAMPLES: MermaidSample[] = [
   "README.md"`,
   },
   {
+    id: "wardley",
+    label: "Wardley map",
+    group: "Diagrams",
+    text: `wardley-beta
+title Tea Shop Value Chain
+
+anchor Business [0.95, 0.63]
+component Cup of Tea [0.79, 0.61]
+component Tea [0.63, 0.81]
+component Hot Water [0.52, 0.80]
+component Kettle [0.43, 0.35]
+component Power [0.10, 0.70]
+
+Business -> Cup of Tea
+Cup of Tea -> Tea
+Cup of Tea -> Hot Water
+Hot Water -> Kettle
+Kettle -> Power
+
+evolve Kettle 0.62
+evolve Power 0.89
+
+note "Standardising power allows Kettles to evolve faster" [0.30, 0.49]`,
+  },
+  {
+    id: "cynefin",
+    label: "Cynefin",
+    group: "Diagrams",
+    text: `cynefin-beta
+  title Strategy Categorization
+
+  complex
+    "Market research"
+    "Run chaos experiment"
+
+  complicated
+    "Competitive analysis"
+
+  clear
+    "Standard pricing"
+
+  chaotic
+    "Crisis management"
+
+  confusion
+    "Unknown failure mode"
+
+  complex --> complicated : "Pattern identified"
+  complicated --> clear : "Best practice codified"
+  clear --> chaotic : "Complacency"
+  chaotic --> complex : "Stabilized"`,
+  },
+  {
+    id: "railroad",
+    label: "Railroad (EBNF)",
+    group: "Diagrams",
+    text: `railroad-ebnf-beta
+title "JSON Grammar"
+
+json = element ;
+element = object | array | string | number | "true" | "false" | "null" ;
+object = "{" [ member ( "," member )* ] "}" ;
+array = "[" [ element ( "," element )* ] "]" ;
+member = string ":" element ;`,
+  },
+  {
+    id: "eventmodeling",
+    label: "Event modeling",
+    group: "Diagrams",
+    text: `eventmodeling
+
+tf 01 ui CartUI
+tf 02 cmd AddItem [[AddItem01]]
+tf 03 evt ItemAdded [[ItemAdded]]
+tf 04 cmd AddItem [[AddItem02]]
+tf 05 evt ItemAdded [[ItemAdded]]
+
+data AddItem01 {
+  description: 'john'
+  image: 'avatar_john'
+  price: 20.4
+}
+
+data AddItem02 {
+  description: 'jack'
+  image: 'avatar_jack'
+  price: 12.5
+}
+
+data ItemAdded {
+  description: string
+  image: string
+  price: number
+}`,
+  },
+  {
+    id: "usecase",
+    label: "Use case",
+    group: "Diagrams",
+    text: `usecase-beta
+direction LR
+accTitle: Online ordering use cases
+accDescr {
+  A customer places an order through the storefront.
+  Staff review the order and inspect its data.
+}
+actor Customer("Customer")
+actor Staff("Order staff")@{ type: hollow, business: true } <<Employee>>
+systemBoundary ordering["Ordering System"]@{ type: package }:::system
+  Browse("Browse products")
+  Checkout("Checkout") <<Core>>:::critical
+  Payment("Process payment")
+  Review[Review order]
+end
+json OrderData@{
+  "status": "pending",
+  "items": [{ "name": "Book", "quantity": 1 }],
+  "total": 29.95
+}:::data
+note for Checkout "\`Validates the **cart** before payment\`"
+Customer starts@-- "places order" ---> Checkout
+Customer --> Browse
+Checkout pays@..> : include Payment
+Staff --> Review
+Review --> OrderData
+classDef system stroke:#c8a02a,stroke-width:2px
+classDef critical stroke:#c33,stroke-width:3px
+classDef data stroke:#3572a5
+style pays stroke:#6b46c1,stroke-width:2px`,
+  },
+  {
+    id: "swimlane",
+    label: "Swimlane",
+    group: "Diagrams",
+    text: `swimlane-beta LR
+  subgraph Customer
+    request[Request service]
+    receive[Receive update]
+  end
+
+  subgraph Support
+    triage[Triage request]
+    answer[Send answer]
+  end
+
+  subgraph Engineering
+    investigate[Investigate issue]
+    fix[Prepare fix]
+  end
+
+  request --> triage
+  triage -->|Known issue| answer
+  triage -->|Needs code change| investigate
+  investigate --> fix --> answer
+  answer --> receive`,
+  },
+  {
+    id: "agentflow",
+    label: "Agent flow",
+    group: "Diagrams",
+    text: `agentflow-beta TB
+  connector llm["LLM API"]
+  llm@{ protocol: "http", endpoint: "https://api.example.com/chat" }
+
+  flow coffee_team["Coffee Team"]
+    city["city"]@{ shape: input, value: "Stockholm" }
+
+    flow researcher["Researcher"]
+      research["research_location"]@{ shape: tool, params: "city :: String", returns: "Report" }
+      write["write_copy"]@{ shape: tool, connectorRef: "llm.chat", returns: "CoffeeCopy" }
+      city --> research --> write
+    end
+    researcher@{ instruction: "Research the city and draft English coffee copy citing sources." }
+
+    flow designer["Designer"]
+      render["generate_html"]@{ shape: tool, connectorRef: "llm.chat", returns: "String" }
+      brand["Nordic Brand Guide"]@{ shape: refdoc }
+      render -.- brand
+    end
+
+    researcher --> designer
+  end`,
+  },
+  {
     id: "info",
     label: "Info",
     group: "Structure",

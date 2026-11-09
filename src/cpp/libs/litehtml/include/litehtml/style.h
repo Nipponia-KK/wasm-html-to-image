@@ -20,6 +20,11 @@ namespace litehtml
             bool important;
             int layer_rank;
             selector_specificity specificity;
+            // Cascade position of the declaration within the style being
+            // built (assigned by style::add_parsed_property / combine);
+            // breaks ties between declarations of equal importance, layer
+            // and specificity, where CSS uses source order. -1 = unstamped.
+            int order = -1;
 
             bool operator >= (const css_priority& other) const
             {
@@ -27,7 +32,9 @@ namespace litehtml
                     return important;
                 if (layer_rank != other.layer_rank)
                     return important ? (layer_rank < other.layer_rank) : (layer_rank > other.layer_rank);
-                return specificity >= other.specificity;
+                if (specificity != other.specificity)
+                    return specificity >= other.specificity;
+                return order >= other.order;
             }
 
             bool operator < (const css_priority& other) const
@@ -36,7 +43,9 @@ namespace litehtml
                     return !important;
                 if (layer_rank != other.layer_rank)
                     return important ? (layer_rank > other.layer_rank) : (layer_rank < other.layer_rank);
-                return specificity < other.specificity;
+                if (specificity != other.specificity)
+                    return specificity < other.specificity;
+                return order < other.order;
             }
         };
 
@@ -68,13 +77,15 @@ namespace litehtml
                 {
                     m_priority.important = false;
                     m_priority.layer_rank = 0;
+                    m_priority.order = -1;
                 }
-                template<class T> property_value(const T& val, bool important, bool has_var = false, int layer = 0, selector_specificity specificity = selector_specificity()) 
+                template<class T> property_value(const T& val, bool important, bool has_var = false, int layer = 0, selector_specificity specificity = selector_specificity(), int ord = -1) 
                         : base(val), m_has_var(has_var) 
                 {
                     m_priority.important = important;
                     m_priority.layer_rank = layer;
                     m_priority.specificity = specificity;
+                    m_priority.order = ord;
                 }
         };
 
@@ -91,20 +102,24 @@ namespace litehtml
                 props_map                                                       m_properties;        
                 static std::map<string_id, string>      m_valid_values;
                 int                                     m_layer = 0;
+                int                                     m_order_counter = 0;
+                int                                     m_forced_order = -1;
                 selector_specificity                    m_specificity;
         public:
                 void add(const css_token_vector& tokens, const string& baseurl = "", document_container* container = nullptr, int layer = 0, selector_specificity specificity = selector_specificity());
                 void add(const string& txt,              const string& baseurl = "", document_container* container = nullptr, int layer = 0, selector_specificity specificity = selector_specificity());
 
-                void add_property(string_id name, const css_token_vector& tokens, const string& baseurl = "", bool important = false, document_container* container = nullptr, int layer = 0, selector_specificity specificity = selector_specificity());
+                void add_property(string_id name, const css_token_vector& tokens, const string& baseurl = "", bool important = false, document_container* container = nullptr, int layer = 0, selector_specificity specificity = selector_specificity(), int order = -1);
                 void add_property(string_id name, const string& val,              const string& baseurl = "", bool important = false, document_container* container = nullptr, int layer = 0, selector_specificity specificity = selector_specificity());
 
                 const property_value& get_property(string_id name) const;
+                const props_map& properties() const { return m_properties; }
 
                 void combine(const style& src, selector_specificity specificity = selector_specificity());
                 void clear()
                 {
                         m_properties.clear();
+                        m_order_counter = 0;
                 }
 
                 void subst_vars(const html_tag* el);

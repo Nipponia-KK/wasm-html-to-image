@@ -44,6 +44,13 @@ describe("playground Mermaid samples", () => {
       "packet-beta",
       "ishikawa-beta",
       "treeView-beta",
+      "wardley-beta",
+      "cynefin-beta",
+      "railroad-ebnf-beta",
+      "eventmodeling",
+      "usecase-beta",
+      "swimlane-beta",
+      "agentflow-beta",
       "info",
     ]) {
       expect(text, keyword).toContain(keyword);

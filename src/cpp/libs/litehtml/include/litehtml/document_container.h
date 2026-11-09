@@ -45,6 +45,7 @@ namespace litehtml
                 virtual void                            load_image(const char* src, const char* baseurl, bool redraw_on_ready) = 0;
                 virtual void                            get_image_size(const char* src, const char* baseurl, litehtml::size& sz) = 0;
                 virtual bool                            get_image_ratio_only(const char* src, const char* baseurl) { return false; }
+                virtual bool                            get_image_no_ratio(const char* src, const char* baseurl) { return false; }
                 virtual void                            draw_image(litehtml::uint_ptr hdc, const background_layer& layer, const std::string& url, const std::string& base_url, object_fit fit = object_fit_fill, const css_token_vector& object_position = css_token_vector(), image_rendering rendering = image_rendering_auto) = 0;
                 virtual void                            draw_solid_fill(litehtml::uint_ptr hdc, const background_layer& layer, const web_color& color) = 0;
                 virtual void                            draw_linear_gradient(litehtml::uint_ptr hdc, const background_layer& layer, const background_layer::linear_gradient& gradient) = 0;

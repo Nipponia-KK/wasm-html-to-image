@@ -12,6 +12,7 @@
  */
 
 import type { HtmlToImageOptions, OutputFormat, RenderResult } from "./core.js";
+import { LogLevel } from "./diagnostics.js";
 
 export interface MermaidOptions {
   /** Colour scheme: a key of {@link MERMAID_THEMES}. Defaults to `"light"`. */
@@ -34,44 +35,61 @@ export interface MermaidOptions {
   mode?: "strict" | "compat" | "recover";
   /** Honour `%%{init: {...}}%%` and frontmatter `config:` (theme, themeVariables) written in the source. Off by default. */
   directives?: boolean;
+  /**
+   * Called with what went wrong or was repaired: `MERMAID_ERROR` when the source did not parse (the image then
+   * shows an error box), and one `MERMAID_RECOVERED` per change the `compat` / `recover` mode made.
+   */
+  onWarning?: (warning: MermaidWarning) => void;
+  /** The most lines of text a diagram may have (comments and blank lines are free). Default 2000; 0 lifts the limit. */
+  maxLines?: number;
+  /** The largest diagram source in bytes. Default 200000; 0 lifts the limit. */
+  maxSourceBytes?: number;
+}
+
+/** One thing the engine reported about a diagram: `code` is `MERMAID_ERROR` or `MERMAID_RECOVERED`. */
+export interface MermaidWarning {
+  code: "MERMAID_ERROR" | "MERMAID_RECOVERED";
+  message: string;
 }
 
 /** What a render function takes: `render` of `wasm-html-to-image`, or `htmlToImage` with its module applied. */
 export type RenderFn = (options: HtmlToImageOptions) => Promise<RenderResult<Uint8Array | string>>;
 
-/** The colours the engine reads from `--mermaid-*`; the same values as the Markdown stylesheet. */
+/**
+ * The themes, by name. The engine owns the palette (`--mermaid-theme`); `fg` and `bg` are the text and
+ * background colour of the theme, for the page that holds the diagram. `light`, `dark`, `neutral` and
+ * `forest` follow the official Mermaid themes of those names (`default` is `light`).
+ */
 export const MERMAID_THEMES = {
-  light: { fg: "#1f2328", bg: "#ffffff", border: "#d1d9e0", surface: "#f6f8fa" },
-  dark: { fg: "#e6edf3", bg: "#0d1117", border: "#3d444d", surface: "#151b23" },
-  neutral: { fg: "#222222", bg: "#ffffff", border: "#999999", surface: "#eeeeee" },
-  forest: { fg: "#1b3a2a", bg: "#ffffff", border: "#8fbf9f", surface: "#e8f5ec", accent: "#2e8b57", line: "#2e8b57" },
-  nord: { fg: "#eceff4", bg: "#2e3440", border: "#4c566a", surface: "#3b4252", accent: "#88c0d0", line: "#81a1c1" },
-  dracula: { fg: "#f8f8f2", bg: "#282a36", border: "#44475a", surface: "#343746", accent: "#bd93f9", line: "#6272a4" },
-  "solarized-light": { fg: "#586e75", bg: "#fdf6e3", border: "#d3cbb7", surface: "#eee8d5", accent: "#268bd2", line: "#93a1a1" },
-  "solarized-dark": { fg: "#93a1a1", bg: "#002b36", border: "#0f4b5b", surface: "#073642", accent: "#2aa198", line: "#586e75" },
-  "rose-pine": { fg: "#e0def4", bg: "#191724", border: "#403d52", surface: "#1f1d2e", accent: "#c4a7e7", line: "#6e6a86" },
-  sepia: { fg: "#433422", bg: "#f4ecd8", border: "#d6c7a1", surface: "#ebe0c4", accent: "#b45f06", line: "#8a7a5c" },
+  light: { fg: "#333333", bg: "#ffffff" },
+  dark: { fg: "#cccccc", bg: "#333333" },
+  neutral: { fg: "#000000", bg: "#ffffff" },
+  forest: { fg: "#000000", bg: "#ffffff" },
+  nord: { fg: "#eceff4", bg: "#2e3440" },
+  dracula: { fg: "#f8f8f2", bg: "#282a36" },
+  "solarized-light": { fg: "#586e75", bg: "#fdf6e3" },
+  "solarized-dark": { fg: "#93a1a1", bg: "#002b36" },
+  "rose-pine": { fg: "#e0def4", bg: "#191724" },
+  sepia: { fg: "#433422", bg: "#f4ecd8" },
 } as const;
 
 export type MermaidTheme = keyof typeof MERMAID_THEMES;
 
-type ThemeColours = { fg: string; bg: string; border: string; surface: string; accent?: string; line?: string };
-
 const escapeHtml = (text: string) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 /** The page that holds one diagram, for `render({ value, ... })`. */
-export function mermaidToHtml(source: string, options: Pick<MermaidOptions, "theme" | "padding" | "background" | "accent" | "mode" | "directives"> & { raster?: boolean } = {}): string {
-  const c: ThemeColours = MERMAID_THEMES[options.theme ?? "light"];
+export function mermaidToHtml(source: string, options: Pick<MermaidOptions, "theme" | "padding" | "background" | "accent" | "mode" | "directives" | "maxLines" | "maxSourceBytes"> & { raster?: boolean } = {}): string {
+  const theme = options.theme ?? "light";
+  const c: { fg: string; bg: string } = MERMAID_THEMES[theme];
   if (!c) throw new Error(`unknown mermaid theme "${options.theme}". Choose from: ${Object.keys(MERMAID_THEMES).join(", ")}`);
   const padding = options.padding ?? 16;
   const background = options.background ?? (options.raster ? c.bg : "transparent");
-  const accentColour = options.accent ?? c.accent;
-  const accent = (accentColour ? ` --mermaid-accent: ${accentColour};` : "") + (c.line ? ` --mermaid-line: ${c.line};` : "") + (options.mode && options.mode !== "strict" ? ` --mermaid-mode: ${options.mode};` : "") + (options.directives ? " --mermaid-directives: on;" : "");
+  const accent = (options.accent ? ` --mermaid-accent: ${options.accent};` : "") + (options.mode && options.mode !== "strict" ? ` --mermaid-mode: ${options.mode};` : "") + (options.directives ? " --mermaid-directives: on;" : "") + (options.maxLines !== undefined ? ` --mermaid-max-lines: ${Math.max(0, Math.floor(options.maxLines))};` : "") + (options.maxSourceBytes !== undefined ? ` --mermaid-max-bytes: ${Math.max(0, Math.floor(options.maxSourceBytes))};` : "");
   return (
     `<!doctype html><html><head><meta charset="utf-8"><style>` +
     `html, body { margin: 0; padding: 0; background: ${background}; }` +
     `body { padding: ${padding}px; }` +
-    `.mermaid { display: inline-block; color: ${c.fg}; --mermaid-fg: ${c.fg}; --mermaid-bg: ${c.bg}; --mermaid-border: ${c.border}; --mermaid-surface: ${c.surface};${accent} }` +
+    `.mermaid { display: inline-block; color: ${c.fg}; --mermaid-theme: ${theme};${accent} }` +
     `</style></head><body><div class="mermaid">${escapeHtml(source)}</div></body></html>`
   );
 }
@@ -82,27 +100,85 @@ function diagramSize(svg: string): { width: number; height: number } | undefined
   return m ? { width: Number(m[1]), height: Number(m[2]) } : undefined;
 }
 
+/** The width the probe render lays the page out at: wider than any diagram the page itself would clip. */
+const PROBE_WIDTH = 4096;
+
 /**
- * Render a Mermaid diagram with the given render function. The page is first laid out wide to learn the
- * diagram's size, then rendered at exactly that width (unless `width` is given), so the result has no
- * stray margin.
+ * The SVG of a page rendered at {@link PROBE_WIDTH}, made the SVG of the same page rendered at `width`: the two differ only in
+ * the width of the outermost `<svg>` (the diagram sits at the page's left edge and paints nothing else). Undefined when that
+ * does not hold, for instance with a page background, which is painted across the whole width.
  */
-export async function renderMermaidWith(
+function refit(svg: string, width: number): string | undefined {
+  const root = /<svg\b[^>]*>/.exec(svg);
+  if (!root || !root[0].includes(`width="${PROBE_WIDTH}"`)) return undefined;
+  const rest = svg.slice(root.index + root[0].length);
+  if (rest.includes(`"${PROBE_WIDTH}"`)) return undefined;
+  return svg.slice(0, root.index) + root[0].replace(`width="${PROBE_WIDTH}"`, `width="${width}"`) + rest;
+}
+
+/**
+ * The log options that pass the engine's Mermaid messages on to `onWarning`. The engine reports repairs and errors through its
+ * log; the page is laid out more than once and each pass draws the diagram again, so each message is passed on once.
+ */
+export function mermaidListen(
+  onWarning: MermaidOptions["onWarning"],
+  base: Pick<HtmlToImageOptions, "logLevel" | "onLog"> = {},
+): Pick<HtmlToImageOptions, "logLevel" | "onLog"> {
+  if (!onWarning) return {};
+  const told = new Set<string>();
+  return {
+    logLevel: Math.max(base.logLevel ?? LogLevel.Warning, LogLevel.Warning),
+    onLog: (level: LogLevel, text: string) => {
+      base.onLog?.(level, text);
+      const m = /^\[(MERMAID_ERROR|MERMAID_RECOVERED)\]\s*(.*)$/.exec(text);
+      if (m && !told.has(text)) {
+        told.add(text);
+        onWarning({ code: m[1] as MermaidWarning["code"], message: m[2] });
+      }
+    },
+  };
+}
+
+/** What `render({ mermaid })` takes: the diagram's source and how to draw it. `width` and `format` are the render options'. */
+export interface MermaidInput extends Omit<MermaidOptions, "format" | "width"> {
+  /** The Mermaid source. */
+  source: string;
+}
+
+/**
+ * Render the Mermaid diagram of `options.mermaid` with `render`, which draws a page (`htmlToImage` with its module applied).
+ * The page is first laid out wide to learn the diagram's size, then rendered at exactly that width (unless `width` is
+ * given), so the result has no stray margin. The other render options (fonts, limits, logging, ...) reach both passes.
+ */
+export async function renderMermaidInput(
   render: RenderFn,
-  source: string,
-  options: MermaidOptions = {},
+  options: HtmlToImageOptions & { mermaid: MermaidInput },
 ): Promise<RenderResult<Uint8Array | string>> {
+  const { mermaid: input, ...rest } = options;
   const format = options.format ?? "svg";
-  const padding = options.padding ?? 16;
+  const padding = input.padding ?? 16;
   const raster = format !== "svg";
-  const value = mermaidToHtml(source, { ...options, raster });
+  const value = mermaidToHtml(input.source, { ...input, raster });
+  const listen = mermaidListen(input.onWarning, rest);
   let width = options.width;
+  if (width === undefined && raster) {
+    // one pass: the page is laid out wide to load its fonts, and the image is drawn as wide as the diagram in it
+    const drawn = await render({ ...rest, ...listen, value, width: PROBE_WIDTH, format, fitContent: padding });
+    // an image as wide as the probe page was not fitted (the engine cannot, or the diagram is that wide): draw it the long way
+    if (drawn.width !== PROBE_WIDTH) return drawn;
+  }
   if (width === undefined) {
-    const probe = await render({ value, width: 4096, format: "svg" });
+    // laid out wide first to learn the diagram's size; an SVG with a transparent page needs nothing more than that width
+    // changed in its first tag, so that one render is the answer (a raster image has to be drawn at its own width)
+    const probe = await render({ ...rest, ...listen, value, width: PROBE_WIDTH, format: "svg" });
     const size = typeof probe.data === "string" ? diagramSize(probe.data) : undefined;
     width = size ? Math.ceil(size.width + 2 * padding) : 800;
+    if (!raster && size && width <= PROBE_WIDTH && input.background === undefined) {
+      const fitted = refit(probe.data as string, width);
+      if (fitted !== undefined) return { ...probe, data: fitted, width };
+    }
   }
-  return render({ value, width, format });
+  return render({ ...rest, ...listen, value, width, format });
 }
 
 /** The shape of `renderMermaid` in each entry point: SVG text by default, bytes for the other formats. */
@@ -111,7 +187,8 @@ export interface RenderMermaid {
   (source: string, options: MermaidOptions): Promise<RenderResult<Uint8Array | string>>;
 }
 
-/** Bind {@link renderMermaidWith} to an entry point's `render`. */
-export function bindRenderMermaid(render: RenderFn): RenderMermaid {
-  return ((source: string, options?: MermaidOptions) => renderMermaidWith(render, source, options)) as RenderMermaid;
+/** `renderMermaid(source, options)` as a call of an entry point's `render`: `render({ mermaid: { source, ... }, format, width })`. */
+export function mermaidRenderOptions(source: string, options: MermaidOptions = {}): HtmlToImageOptions & { mermaid: MermaidInput } {
+  const { format, width, ...rest } = options;
+  return { mermaid: { ...rest, source }, format, width };
 }

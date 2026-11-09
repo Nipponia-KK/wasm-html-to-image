@@ -156,6 +156,7 @@ const result = await htmlToImage(mod, {
 | `wasm-html-to-image/preact`     | Preact integration           | Direct rendering wrapper for Preact JSX nodes                          |
 | `wasm-html-to-image/tailwind`   | Styling pipeline             | UnoCSS / Tailwind v4 utilities as CSS (`tw` prop, `@theme`, `@apply`)                                   |
 | `wasm-html-to-image/markdown`   | Markdown input               | GitHub-flavoured Markdown to styled HTML / PDF documents (`markdownToHtml`, `markdownToDocument`, templates) |
+| `wasm-html-to-image/single`, `/workers` | Mermaid diagrams        | `renderMermaid(source, options)` returns one diagram as an SVG string or an image (33 diagram types, themes, input repair) |
 | `wasm-html-to-image/markdown-math` | Maths in Markdown         | KaTeX renderer for Markdown math expressions (`$...$`, `$$...$$`) via `katexMath` |
 
 ---

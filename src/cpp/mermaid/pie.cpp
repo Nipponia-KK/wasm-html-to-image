@@ -26,13 +26,11 @@ std::string unquote(std::string s) {
     return s;
 }
 
-/// The percentage as text: one decimal unless it is whole.
+/// The percentage as text: rounded to a whole number, as Mermaid draws it.
 std::string percent(double v) {
     char buf[32];
-    std::snprintf(buf, sizeof(buf), "%.1f", v);
-    std::string s = buf;
-    if (s.size() > 2 && s.compare(s.size() - 2, 2, ".0") == 0) s.resize(s.size() - 2);
-    return s + "%";
+    std::snprintf(buf, sizeof(buf), "%.0f", v);
+    return std::string(buf) + "%";
 }
 
 }  // namespace
@@ -101,7 +99,9 @@ bool render_pie(const std::string& source, const Options& options, std::string& 
     double H = top + 2 * R + pad;
     H = std::max(H, top + slices.size() * kRow + pad);
 
+    const bool scaled = !th.scale.empty();  // the official look: translucent slices on a scale of colours
     auto shade = [&](size_t k) {
+        if (scaled) return th.scale[k % th.scale.size()];
         size_t n = slices.size();
         int pct = n <= 1 ? 80 : 88 - (int)(70.0 * k / (n - 1));
         return mix(th.fg, th.bg, pct);
@@ -113,22 +113,23 @@ bool render_pie(const std::string& source, const Options& options, std::string& 
         double frac = slices[k].value / total, a1 = angle + frac * 2 * kPi;
         std::string fill = shade(k);
         if (frac >= 0.9999) {
-            body += "<circle cx=\"" + num(cx) + "\" cy=\"" + num(cy) + "\" r=\"" + num(R) + "\" fill=\"" + fill + "\" stroke=\"" + th.bg + "\" stroke-width=\"2\"/>\n";
+            body += "<circle cx=\"" + num(cx) + "\" cy=\"" + num(cy) + "\" r=\"" + num(R) + "\" fill=\"" + fill + "\"" + (scaled ? " fill-opacity=\"0.7\"" : "") + " stroke=\"" + th.scale_stroke + "\" stroke-width=\"2\"/>\n";
         } else if (frac > 0) {
             double x0 = cx + R * std::cos(angle), y0 = cy + R * std::sin(angle), x1 = cx + R * std::cos(a1), y1 = cy + R * std::sin(a1);
             body += "<path class=\"slice\" d=\"M" + num(cx) + "," + num(cy) + " L" + num(x0) + "," + num(y0) + " A" + num(R) + "," + num(R) + " 0 " + (frac > 0.5 ? "1" : "0") + " 1 " +
-                    num(x1) + "," + num(y1) + " Z\" fill=\"" + fill + "\" stroke=\"" + th.bg + "\" stroke-width=\"2\" stroke-linejoin=\"round\"/>\n";
+                    num(x1) + "," + num(y1) + " Z\" fill=\"" + fill + "\"" + (scaled ? " fill-opacity=\"0.7\"" : "") + " stroke=\"" + th.scale_stroke + "\" stroke-width=\"2\" stroke-linejoin=\"round\"/>\n";
         }
-        if (frac >= 0.04) {
+        if (frac > 0) {  // every slice is labelled, however thin, as Mermaid draws it
             double mid = (angle + a1) / 2;
             int pct_shade = slices.size() <= 1 ? 80 : 88 - (int)(70.0 * k / (slices.size() - 1));
-            centered_text(body, th, {percent(frac * 100)}, cx + R * 0.66 * std::cos(mid), cy + R * 0.66 * std::sin(mid), 11, 600, pct_shade > 50 ? th.bg : th.fg);
+            centered_text(body, th, {percent(frac * 100)}, cx + R * 0.66 * std::cos(mid), cy + R * 0.66 * std::sin(mid), 11, 600, scaled ? th.text : pct_shade > 50 ? th.bg : th.fg);
         }
         angle = a1;
     }
+    if (scaled) body += "<circle cx=\"" + num(cx) + "\" cy=\"" + num(cy) + "\" r=\"" + num(R + 1) + "\" fill=\"none\" stroke=\"" + th.scale_stroke + "\" stroke-width=\"2\"/>\n";
     for (size_t k = 0; k < slices.size(); k++) {
         double y = top + 8 + k * kRow;
-        body += "<rect x=\"" + num(lx) + "\" y=\"" + num(y) + "\" width=\"12\" height=\"12\" rx=\"2\" fill=\"" + shade(k) + "\" stroke=\"" + th.border + "\" stroke-width=\"1\"/>\n";
+        body += "<rect x=\"" + num(lx) + "\" y=\"" + num(y) + "\" width=\"12\" height=\"12\" rx=\"2\" fill=\"" + shade(k) + "\" stroke=\"" + (scaled ? shade(k) : th.border) + "\" stroke-width=\"1\"/>\n";
         aligned_text(body, th, {legend[k]}, lx + 20, y + 6, kLegend, 400, th.text, "start");
     }
     svg = svg_document(th, W, H, body);

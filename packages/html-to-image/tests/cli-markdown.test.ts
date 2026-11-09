@@ -130,7 +130,7 @@ describe.skipIf(!built)("wasm-html-to-image CLI with Markdown", () => {
 
   it("--list-templates prints the bundled templates and needs no input", async () => {
     const { stdout } = await cli(["--list-templates"]);
-    expect(stdout.split("\n").filter(Boolean).map((l) => l.split(/\s+/)[0])).toEqual(["default", "report", "proposal", "book", "paper", "compact"]);
+    expect(stdout.split("\n").filter(Boolean).map((l) => l.split(/\s+/)[0])).toEqual(["default", "report", "proposal", "book", "paper", "compact", "manual", "minutes", "letter", "slides", "invoice"]);
   });
 
   it("rejects an unknown --markdown-theme with a readable error", async () => {

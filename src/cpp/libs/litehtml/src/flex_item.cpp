@@ -524,9 +524,14 @@ void litehtml::flex_item_row_direction::direction_specific_init(const litehtml::
 
 	// A replaced item with an intrinsic ratio that is stretched to a definite container height transfers
 	// that height to its main size (CSS Flexbox 9.2): the flex base size follows the stretched cross size.
+	// An item with a definite width keeps that width as its base, but its automatic minimum is
+	// still the transferred size: flex-shrink freezes it there instead of at its intrinsic width
+	// (a width:200px img, ratio 80/90, in a 109.3-tall row freezes at 97.2 in Chromium, not 80).
+	const bool main_size_auto = size_prop.is_predefined() && size_prop.predef() == 0;
+	const bool main_size_definite_px = !size_prop.is_predefined() && size_prop.units() == css_units_px;
 	if (!m_container_wm.is_vertical() && el->src_el()->is_replaced() && el->css().get_flex_basis().is_predefined() && el->css().get_flex_basis().predef() == flex_basis_auto &&
 		self_size.render_height.type != containing_block_context::cbc_value_type_auto &&
-		size_prop.is_predefined() && size_prop.predef() == 0 &&
+		(main_size_auto || main_size_definite_px) &&
 		el->css().get_height().is_predefined() && el->css().get_height().predef() == 0 &&
 		((align & 0xFF) == flex_align_items_stretch || (align & 0xFF) == flex_align_items_normal) &&
 		el->parent() && el->parent()->css().get_flex_wrap() == flex_wrap_nowrap)
@@ -536,7 +541,20 @@ void litehtml::flex_item_row_direction::direction_specific_init(const litehtml::
 		if (sz.width > 0 && sz.height > 0)
 		{
 			const pixel_t cross = std::max<pixel_t>(0, (pixel_t)self_size.render_height - el->content_offset_block(m_container_wm));
-			flex_base_size = cross * sz.width / sz.height + render_offset;
+			const pixel_t transferred = cross * sz.width / sz.height + render_offset;
+			if (!main_size_auto)
+			{
+				// Definite width: the base stays the width; only the automatic
+				// minimum follows the transfer (see the block comment above), but never
+				// above the specified size (CSS Flexbox 4.5: min(specified, content size
+				// suggestion)): a width:120px 300x50 image in a 60-tall row stays 120 wide.
+				if (min_size_prop.is_predefined() && !el->src_el()->is_ratio_only_replaced())
+				{
+					min_main_size = std::min(transferred, flex_base_size);
+				}
+			} else
+			{
+			flex_base_size = transferred;
 			// The transferred size is the item's min-content contribution in this container
 			// too: at the definite stretched cross size the ratio leaves it no narrower
 			// size, so an intrinsic query on the container (a min-content grid track) sees
@@ -560,6 +578,7 @@ void litehtml::flex_item_row_direction::direction_specific_init(const litehtml::
 				// afterwards, and a floor raised from THIS pass's height would clamp
 				// that second transfer up to a size the item never gets.
 				min_main_size = flex_base_size;
+			}
 			}
 		}
 	}
@@ -846,6 +865,28 @@ void litehtml::flex_item_column_direction::direction_specific_init(const litehtm
 		}
 		return intrinsic_inline_size;
 	};
+	// The content measure answers an item's max-content width; the fit-content
+	// width it feeds is min(max-content, max(min-content, available)), so a
+	// 420px max-content inside a 379.4px column is 379.4, not 420 -- measured
+	// at 420 the item's block size is frozen for a box it never gets.
+	auto clamp_fit_measure = [&](containing_block_context& fit_cb, formatting_context* ctx) -> pixel_t
+	{
+		el->measure(fit_cb, ctx);
+		pixel_t measured = std::max<pixel_t>(0, el->inline_size(m_container_wm) -
+												el->content_offset_inline(m_container_wm) +
+												el->box_sizing_inline(m_container_wm));
+		const pixel_t available = self_size.render_width.value - el->content_offset_width() + el->box_sizing_width();
+		if (measured > available && self_size.render_width.value > 0)
+		{
+			fit_cb.size_mode |= containing_block_context::size_mode_min_content;
+			el->measure(fit_cb, ctx);
+			const pixel_t min_measured = std::max<pixel_t>(0, el->inline_size(m_container_wm) -
+															  el->content_offset_inline(m_container_wm) +
+															  el->box_sizing_inline(m_container_wm));
+			measured = std::max(min_measured, available);
+		}
+		return measured;
+	};
 	auto stretched_inline_size = [&]() -> pixel_t
 	{
 		pixel_t width = self_size.render_width.value - el->content_offset_width() + el->box_sizing_width();
@@ -862,18 +903,13 @@ void litehtml::flex_item_column_direction::direction_specific_init(const litehtm
 		{
 			formatting_context fmt_ctx_copy;
 			if (fmt_ctx) fmt_ctx_copy = *fmt_ctx;
-			// Width auto with the content mode is the fit-content measure (available width, floored by
-			// the item's min-content width and clamped by its max-width).
 			containing_block_context fit_cb = self_size;
 			fit_cb.height.type = containing_block_context::cbc_value_type_auto;
 			fit_cb.size_mode &= ~(containing_block_context::size_mode_exact_width |
 								  containing_block_context::size_mode_exact_height);
 			fit_cb.size_mode |= containing_block_context::size_mode_measure |
 								containing_block_context::size_mode_content;
-			el->measure(fit_cb, fmt_ctx ? &fmt_ctx_copy : nullptr);
-			fit_inline_size = std::max<pixel_t>(0, el->inline_size(m_container_wm) -
-												   el->content_offset_inline(m_container_wm) +
-												   el->box_sizing_inline(m_container_wm));
+			fit_inline_size = clamp_fit_measure(fit_cb, fmt_ctx ? &fmt_ctx_copy : nullptr);
 		}
 		return std::max(width, (pixel_t) fit_inline_size);
 	};
@@ -891,10 +927,7 @@ void litehtml::flex_item_column_direction::direction_specific_init(const litehtm
 								  containing_block_context::size_mode_exact_height);
 			fit_cb.size_mode |= containing_block_context::size_mode_measure |
 								containing_block_context::size_mode_content;
-			el->measure(fit_cb, fmt_ctx ? &fmt_ctx_copy : nullptr);
-			fit_inline_size = std::max<pixel_t>(0, el->inline_size(m_container_wm) -
-												   el->content_offset_inline(m_container_wm) +
-												   el->box_sizing_inline(m_container_wm));
+			fit_inline_size = clamp_fit_measure(fit_cb, fmt_ctx ? &fmt_ctx_copy : nullptr);
 		}
 		return fit_inline_size;
 	};
@@ -1247,6 +1280,24 @@ void litehtml::flex_item_column_direction::layout_item(litehtml::flex_line &ln,
 	// that does not stretch is the same fit-content size (CSS Flexbox 9.4: an item with no cross-size
 	// stretch is sized from its content), so it is clamped the same way.
 	const int cross_predef = cross_prop.is_predefined() ? (int) cross_prop.predef() : -1;
+	// A min-content inline size is the item's smallest content width: the
+	// content measure above answers max-content, so re-measure at min-content
+	// and pin the item there.
+	if (!m_container_wm.is_vertical() && cross_predef == 3)
+	{
+		containing_block_context min_cb = child_cb;
+		min_cb.size_mode |= containing_block_context::size_mode_min_content;
+		el->measure(min_cb, fmt_ctx);
+		containing_block_context pin_cb = child_cb;
+		pin_cb.width = el->inline_size(m_container_wm) - el->content_offset_inline(m_container_wm) +
+					   el->box_sizing_inline(m_container_wm);
+		pin_cb.width.type = containing_block_context::cbc_value_type_absolute;
+		pin_cb.render_width = pin_cb.width;
+		pin_cb.size_mode |= containing_block_context::size_mode_exact_width;
+		pin_cb.size_mode &= ~(containing_block_context::size_mode_content |
+							  containing_block_context::size_mode_min_content);
+		el->measure(pin_cb, fmt_ctx);
+	}
 	if (!m_container_wm.is_vertical() && (cross_predef == 1 || (cross_predef == 0 && !stretch)))
 	{
 		const pixel_t available = self_size.render_width.value - el->content_offset_width() + el->box_sizing_width();

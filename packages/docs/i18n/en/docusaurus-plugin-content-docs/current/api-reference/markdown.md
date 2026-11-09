@@ -14,13 +14,13 @@ It is implemented in pure JavaScript with no Node.js platform dependencies, runn
 ## Key Capabilities
 
 - **`markdownToDocument()` & `markdownToHtml()`**: Produce HTML and complete PDF render options (headers, footers, metadata).
-- **Template System**: 6 built-in templates (`default`, `report`, `proposal`, `book`, `paper`, `compact`) for ready-to-use professional styling without writing CSS.
+- **Template System**: 11 built-in templates (`default`, `report`, `proposal`, `book`, `paper`, `compact`, `manual`, `minutes`, `letter`, `slides`, `invoice`) for ready-to-use professional styling without writing CSS.
 - **Automatic Table of Contents (TOC)**: Generates a table of contents with exact destination page numbers filled in during PDF pagination.
 - **Automatic PDF Bookmarks (Outline)**: Creates nested PDF document outlines from `h1`–`h6` headings.
 - **Smart Page Break Handling**: Avoids orphan headings (`break-after: avoid`) and prevents breaking code blocks and tables across page boundaries.
 - **YAML Front Matter**: Parses document metadata (`title`, `subtitle`, `author`, `date`, `template`, `stamp`, `cover`, `accent`, etc.).
 - **Syntax Highlighting**: Built-in highlight.js covering 20+ programming languages.
-- **Mermaid diagrams**: ` ```mermaid ` blocks (flowchart, sequence, state, class, ER, bar/line chart) are drawn inside the engine.
+- **Mermaid diagrams**: ` ```mermaid ` blocks are drawn inside the engine (flowchart, sequence, state, class, ER, Gantt, pie and more: over 30 kinds; see the [list](./mermaid.md#6-supported-diagrams)).
 - **KaTeX Mathematical Typesetting (`/markdown-math`)**: High-accuracy rendering for inline `$…$` and display `$$…$$` equations.
 
 ---
@@ -92,6 +92,29 @@ const { data } = await render({
 });
 ```
 
+### 3. Options (`MarkdownOptions`)
+
+The second argument of `markdownToHtml()` and `markdownToDocument()`.
+
+| Option | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `template` | `string \| MarkdownTemplate` | none | A bundled template by name, or your own (see Custom Templates). Wins over the front matter's `template:` |
+| `settings` | `DocumentSettings` | none | Document settings that override the front matter (`title`, `author`, `accent`, `font`, `page_size`, `cover`, `stamp`, ...) |
+| `theme` | `"light" \| "dark"` | `"light"` | Colour scheme of the built-in stylesheet |
+| `css` | `string` | none | Extra CSS appended after the built-in stylesheet |
+| `stylesheet` | `string` | none | Replace the built-in stylesheet entirely (`theme` is then ignored) |
+| `paged` | `boolean` | `false` | For PDF: `padding` becomes the `@page` margin on every page, so pages after the first keep their top and bottom margins |
+| `padding` | `number` | `32` | Space around the article, px |
+| `maxWidth` | `number` | none | Maximum width of the article, px; omitted means the full viewport width |
+| `title` | `string` | front matter `title` | `<title>` of the document |
+| `toc` | `boolean \| { depth?: number, title?: string }` | on for PDF (`paged`) | Table of contents. `depth` 1–6 (default 3); `title` is the heading above it (default `Contents`, empty leaves it out) |
+| `highlight` | `boolean` | `true` | Syntax-highlight code blocks that name a language |
+| `mermaid` | `boolean` | `true` | Draw ` ```mermaid ` as diagrams; `false` leaves them as code blocks |
+| `frontMatter` | `boolean` | `true` | Strip a leading YAML front matter block and read its `title` |
+| `math` | `MathRenderer` | none | Typeset `$…$` / `$$…$$`: pass `katexMath()` from `wasm-html-to-image/markdown-math`. Without it a dollar sign is just text |
+
+`markdownToDocument()` returns `{ html, settings, renderOptions }`. `settings` is what applied (template defaults < front matter < options); `renderOptions` are the PDF options to spread into `render()` (header, footer, `pdfTitle`, `pdfAuthor`, `pdfBackground`, `pdfSkipRunning`). `markdownStylesheet()` returns just the CSS of the built-in stylesheet.
+
 ---
 
 ## Built-in Templates
@@ -106,6 +129,11 @@ Templates configure the document's typography, page size, margins, running heade
 | `book` | Books, long-form reading | A5, serif, justified text, each chapter (`h1`) starts on a new page, cover, TOC, page numbers |
 | `paper` | Technical papers, essays | A4, serif, justified text, tight line-height, page number in footer |
 | `compact` | Notes, cheat sheets | 12px font, 12mm margins, no cover or TOC |
+| `manual` | Manuals, specifications | A4, cover, contents, numbered headings, each chapter (`h1`) on a new page, call-outs, title in the header and page number in the footer |
+| `minutes` | Meeting minutes | A4, no cover or contents, ruled title, tinted table headers, title and date in the header |
+| `letter` | Letters, notices | A4, serif, wide margins, generous leading, `.right` and `.center` classes for the address block and date |
+| `slides` | Presentations | A4 landscape, 28px text, each `h2` on its own page, `---` ignored, with a cover |
+| `invoice` | Invoices, quotations | A4, large right-aligned title, accent table header, emphasised last row, call-out box for notes |
 
 Inspect available templates with `listTemplates()`:
 
@@ -147,6 +175,35 @@ Settings are resolved in the following order:
 3. API options (`options.settings`, `options.title`, etc.)
 
 ---
+
+### Page and cover settings
+
+These front matter keys also change the page:
+
+| Key | Value | Effect |
+| :--- | :--- | :--- |
+| `header` / `footer` | HTML | Running header and footer (replacing the template's). `{{title}}`, `{{author}}`, `{{date}}`, `{{stamp}}`, `{{pageNumber}}`, `{{totalPages}}` and `{{chapter}}` (the `h1` the page shows first, else the chapter before it) work. The `book` header shows the chapter |
+| `margin` | `20mm 18mm` | Page margin (a CSS `margin` value) |
+| `orientation` | `landscape` | Turn the paper sideways |
+| `toc_depth` | `1` to `6` | Deepest heading level in the contents |
+| `toc_title` | text | Heading of the contents page (`Contents`) |
+| `cover_style` | `band` / `plain` / `center` | Look of the cover |
+| `numbering` | `true` | Number the headings `1`, `1.1`, `1.1.1` |
+| `footnotes` | `end` | Where footnotes go: `end` lists them after the text, `page` sets each at the foot of the page that refers to it (PDF; if one note is taller than a third of a page, the list stays at the end) |
+| `mermaid_theme` | a name (`nord`, ...) | Draw the diagrams with a named theme instead of the document's light / dark colours (pick one that suits the page: `dracula`, `nord` or `dark` on a dark document) |
+| `mermaid_mode` | `compat` / `recover` | How much a broken diagram is forgiven |
+| `mermaid_directives` | `true` | Honour `%%{init}%%` and frontmatter inside the diagrams |
+
+With a template that has a cover, the cover carries no header or footer (page numbers still count it as page 1).
+
+## Syntax extensions
+
+- **Call-outs**: a block quote that starts with `[!NOTE]`, `[!TIP]`, `[!IMPORTANT]`, `[!WARNING]` or `[!CAUTION]` becomes a coloured box (the title is Japanese with `lang: ja`).
+- **Numbered figures**: an image with a title, `![alt](src "Title")`, becomes a figure captioned `Figure 1　Title`.
+- **Page break**: `<!-- pagebreak -->` forces a new page.
+- **Footnotes**: `[^name]` in the text and `[^name]: the note` anywhere put a list of notes at the end, numbered by first use.
+- **Tables** span the text width in `report`, `proposal`, `book` and `paper`.
+- **Long code lines** wrap at the right edge instead of being cut.
 
 ## Table of Contents & PDF Bookmarks
 
@@ -230,32 +287,7 @@ graph LR
 
 ### Getting SVG or an image from JavaScript
 
-`renderMermaid()` returns an SVG string or an image for a diagram source, sized to the diagram.
-
-```typescript
-import { renderMermaid } from "wasm-html-to-image";
-
-const { data: svg } = await renderMermaid("graph LR\n  A --> B"); // an SVG string
-const { data: png } = await renderMermaid("graph LR\n  A --> B", {
-  format: "png", // "svg" (default), "png", "webp", "pdf", ...
-  theme: "dark", // "light" (default) | "dark"
-});
-```
-
-| Option | Default | Description |
-| :--- | :--- | :--- |
-| `format` | `"svg"` | Output format: a string for `"svg"`, a `Uint8Array` otherwise |
-| `theme` | `"light"` | Colour scheme: `light`, `dark`, `neutral`, `forest`, `nord`, `dracula`, `solarized-light`, `solarized-dark`, `rose-pine`, `sepia` |
-| `padding` | `16` | Space around the diagram (px) |
-| `width` | diagram width + padding | Image width (px) |
-| `background` | transparent for SVG, the theme background for images | Page background (a CSS colour) |
-| `accent` | derived from the theme | Colour of arrows and bars |
-| `directives` | `false` | Honour `%%{init: {...}}%%` and frontmatter `config:` (`theme`, `themeVariables`) written in the source |
-| `mode` | `"strict"` | How much a broken source is forgiven. `"compat"` accepts a keyword in the wrong case, a BOM or CRLF, and unfinished `end` / `}` blocks; `"recover"` also fixes a misspelt keyword and skips lines the diagram cannot read |
-
-Even in `strict` mode, a misspelt diagram keyword gets a "did you mean `flowchart`?" hint in the error box. From page CSS, pick a theme with `--mermaid-theme: nord` (single `--mermaid-bg`-style colours are applied on top of it) and the mode with `--mermaid-mode: compat` (or `recover`).
-
-On the Workers entries (`/workerd`, `/edge-light`) use `renderMermaidWith((options) => render(options, wasm), source, options)`. `mermaidToHtml(source, options)` returns the HTML page that holds one diagram.
+`renderMermaid()` (a diagram alone as an SVG string or an image), themes, input repair and CSS control are described in [Mermaid Conversion](./mermaid.md).
 
 ## KaTeX Math Typesetting (`/markdown-math`)
 
@@ -309,3 +341,26 @@ const myTemplate = {
 
 const doc = markdownToDocument(md, { template: myTemplate, paged: true });
 ```
+
+### Build on a bundled template (`extends`)
+
+Put the name of a bundled template in `extends` and override its `type`, `page` and `defaults` field by field; your `css` is appended after the base's. `defineTemplate()` only type-checks and returns the value unchanged.
+
+```typescript
+import { defineTemplate, markdownToDocument } from "wasm-html-to-image/markdown";
+
+const mine = defineTemplate({
+  extends: "report",
+  type: { size: 13 },
+  defaults: { accent: "#0f766e" },
+  css: ".markdown-body h2 { border-bottom-style: dashed; }",
+});
+
+const doc = markdownToDocument(md, { template: mine, paged: true });
+```
+
+From the CLI, a JSON file such as `{ "extends": "report", "defaults": { "accent": "#0f766e" } }` works with `--template mine.json`.
+
+### Write colours as CSS variables
+
+In a template's `css`, use `var(--surface)`, `var(--border)`, `var(--muted)`, `var(--text)` and `var(--accent)` instead of fixed colours, so the template follows both the light and the dark theme.

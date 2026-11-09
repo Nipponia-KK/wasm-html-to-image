@@ -49,6 +49,33 @@ litehtml::render_item::render_item(std::shared_ptr<element> _src_el)
 
 litehtml::pixel_t litehtml::render_item::measure(
     const containing_block_context& containing_block_size, formatting_context* fmt_ctx) {
+    // A definite keyword inline size is the element's size in every sizing
+    // context: a width:max-content element contributes its max-content size
+    // even to a min-content query (a wrapping column flex whose item is
+    // width:max-content has that size as its automatic minimum), and a
+    // width:min-content element its min-content size even to a max-content
+    // query (the same container's flex base then uses the resolved size).
+    // Rewrite the query mode to match the property.
+    if (css().get_writing_mode() == writing_mode_horizontal_tb &&
+        (containing_block_size.size_mode & (containing_block_context::size_mode_content |
+                                            containing_block_context::size_mode_min_content))) {
+        const css_length& w = css().get_width();
+        if (w.is_predefined()) {
+            containing_block_context adjusted = containing_block_size;
+            bool changed = false;
+            if (w.predef() == 2 &&
+                (adjusted.size_mode & containing_block_context::size_mode_min_content)) {
+                adjusted.size_mode &= ~containing_block_context::size_mode_min_content;
+                changed = true;
+            } else if (w.predef() == 3 &&
+                       (adjusted.size_mode & containing_block_context::size_mode_content) &&
+                       !(adjusted.size_mode & containing_block_context::size_mode_min_content)) {
+                adjusted.size_mode |= containing_block_context::size_mode_min_content;
+                changed = true;
+            }
+            if (changed) return measure(adjusted, fmt_ctx);
+        }
+    }
     if (m_cached_parent_width != (pixel_t)containing_block_size.inline_size()) {
         calc_outlines(containing_block_size.inline_size());
         m_cached_parent_width = containing_block_size.inline_size();

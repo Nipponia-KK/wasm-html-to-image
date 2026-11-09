@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PNG } from "pngjs";
-import { renderMermaid } from "wasm-html-to-image/single";
+import { render, renderMermaid } from "wasm-html-to-image/single";
 
 const GRAPH = "graph LR\n  A[開始] --> B{判定}\n  B -->|はい| C[完了]";
 
@@ -16,6 +16,25 @@ describe("renderMermaid", () => {
     expect(Number(outer[2])).toBeGreaterThan(40);
   });
 
+  it("widens left-right subgraph frames to hold a long title, without frames meeting", async () => {
+    const src = [
+      "flowchart LR",
+      '  subgraph S1["A very long subgraph title that is much wider than its contents"]',
+      "    A --> B",
+      "  end",
+      '  subgraph S2["Another quite long frame title for the second group"]',
+      "    C --> D",
+      "  end",
+      "  B --> C",
+    ].join("\n");
+    const { data } = await renderMermaid(src);
+    const frames = [...data.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="(?!26")[\d.]+" rx="2"/g)].map((m) => ({ x: +m[1], w: +m[3] }));
+    const titles = [...data.matchAll(/<text x="([\d.]+)"[^>]*font-weight="600"[^>]*>([^<]+)/g)].map((m) => ({ x: +m[1], len: m[2].length }));
+    expect(frames).toHaveLength(2);
+    expect(frames[0].x + frames[0].w).toBeLessThan(frames[1].x); // side by side, not overlapping
+    expect(titles[0].x + titles[0].len * 5.5).toBeLessThan(frames[0].x + frames[0].w); // the title fits in its frame
+  });
+
   it("keeps accTitle and accDescr out of the picture and in the SVG", async () => {
     const plain = await renderMermaid(GRAPH, { format: "png" });
     const described = await renderMermaid(`graph LR\n  accTitle: 判定の流れ\n  accDescr {\n  開始から完了まで\n  }\n${GRAPH.split("\n").slice(1).join("\n")}`, { format: "png" });
@@ -23,6 +42,40 @@ describe("renderMermaid", () => {
     const svg = (await renderMermaid(`graph LR\n  accTitle: 判定の流れ\n${GRAPH.split("\n").slice(1).join("\n")}`)).data;
     expect(svg).toContain("開始");
     expect(svg).not.toContain("accTitle");
+  });
+
+  it("reports what the repair changed and what did not parse, through onWarning", async () => {
+    const seen: { code: string; message: string }[] = [];
+    await renderMermaid("flowchrt LR\n  A --> B\n  not a line", { mode: "recover", onWarning: (w) => seen.push(w) });
+    expect(seen.filter((w) => w.code === "MERMAID_RECOVERED").map((w) => w.message)).toEqual(expect.arrayContaining([expect.stringContaining("flowchrt")]));
+    expect(seen.every((w) => w.code === "MERMAID_RECOVERED")).toBe(true);
+
+    const errors: { code: string; message: string }[] = [];
+    await renderMermaid("flowchrt LR\n  A --> B", { onWarning: (w) => errors.push(w) });
+    expect(errors).toEqual([expect.objectContaining({ code: "MERMAID_ERROR", message: expect.stringContaining("did you mean") })]);
+
+    const none: unknown[] = [];
+    await renderMermaid(GRAPH, { onWarning: (w) => none.push(w) });
+    expect(none).toEqual([]);
+  });
+
+  it("refuses a diagram over the size limits, and maxLines / maxSourceBytes move them", async () => {
+    const many = "graph TD\n" + Array.from({ length: 30 }, (_, k) => `  n${k} --> n${k + 1}`).join("\n");
+    const seen: string[] = [];
+    const refused = (await renderMermaid(many, { maxLines: 10, onWarning: (w) => seen.push(w.message) })).data;
+    expect(refused).toContain("#cf222e"); // the error box
+    expect(seen[0]).toContain("too many lines");
+    expect((await renderMermaid(many, { maxLines: 0 })).data).not.toContain("#cf222e");
+    expect((await renderMermaid(many, { maxSourceBytes: 40 })).data).toContain("#cf222e");
+    expect((await renderMermaid(many)).data).not.toContain("#cf222e"); // the defaults are generous
+  });
+
+  it("encodes AVIF and JXL (the playground offers both)", async () => {
+    const avif = (await renderMermaid(GRAPH, { format: "avif" })).data as Uint8Array;
+    expect(Buffer.from(avif.subarray(4, 12)).toString("latin1")).toBe("ftypavif");
+    const jxl = (await renderMermaid(GRAPH, { format: "jxl" })).data as Uint8Array;
+    const naked = jxl[0] === 0xff && jxl[1] === 0x0a; // a bare codestream, or the ISO box container
+    expect(naked || Buffer.from(jxl.subarray(4, 8)).toString("latin1") === "JXL ").toBe(true);
   });
 
   it("takes a named theme: its background on the page and its accent on the arrows", async () => {
@@ -51,9 +104,9 @@ describe("renderMermaid", () => {
     const b = PNG.sync.read(Buffer.from(dark.data));
     expect(a.width).toBeLessThan(700);
     expect(a.width).toBe(b.width);
-    // the page takes the theme's background: white vs near black in the corner
+    // the page takes the theme's background: white vs the official dark grey (#333333) in the corner
     expect(a.data[0]).toBeGreaterThan(240);
-    expect(b.data[0]).toBeLessThan(40);
+    expect(b.data[0]).toBeLessThan(60);
   });
 
   it("honours width, padding and an explicit background", async () => {
@@ -71,5 +124,115 @@ describe("renderMermaid", () => {
     let red = 0;
     for (let i = 0; i < png.data.length; i += 4) if (png.data[i] > 180 && png.data[i + 1] < 80 && png.data[i + 2] < 80) red++;
     expect(red).toBeGreaterThan(20);
+  });
+});
+
+describe("a diagram in HTML on a dark page", () => {
+  const diagram = '<div class="mermaid">graph LR\n A --> B</div>';
+  const fill = async (html: string) => ((await render({ value: html, width: 400, format: "svg" })).data as string).includes('fill="#1f2020"');
+
+  it("takes the dark theme without a theme being named, and not on a light page", async () => {
+    expect(await fill(`<body style="background:#111;color:#eee">${diagram}</body>`)).toBe(true);
+    expect(await fill(`<body style="color:#eee">${diagram}</body>`)).toBe(true); // no background: light text decides
+    expect(await fill(`<body style="background:#fff;color:#111">${diagram}</body>`)).toBe(false);
+    expect(await fill(diagram)).toBe(false);
+  });
+
+  it("leaves a theme or a palette the page names alone", async () => {
+    expect(await fill(`<body style="background:#111;color:#eee"><div style="--mermaid-theme:light">${diagram}</div></body>`)).toBe(false);
+    expect(await fill(`<body style="background:#111;color:#eee"><div style="--mermaid-bg:#fff">${diagram}</div></body>`)).toBe(false);
+  });
+});
+
+describe("frame titles longer than the frame's contents", () => {
+  const T = "A very long frame title that is much wider than its contents";
+  const width = async (src: string) => Number(/<svg[^>]*\bwidth="([\d.]+)"/.exec((await renderMermaid(src)).data)![1]);
+  // the drawing is at least as wide as the title text (about 6 px a character at 12 px)
+  const roomFor = (w: number) => expect(w).toBeGreaterThan(T.length * 6);
+
+  it("widens a state composite, top-down and left-right", async () => {
+    roomFor(await width(`stateDiagram-v2\n state "${T}" as S1 {\n  a --> b\n }\n [*] --> S1`));
+    roomFor(await width(`stateDiagram-v2\n direction LR\n state "${T}" as S1 {\n  a --> b\n }\n [*] --> S1`));
+  });
+
+  it("widens a sequence box", async () => {
+    roomFor(await width(`sequenceDiagram\n box ${T}\n participant A\n participant B\n end\n A->>B: hi`));
+  });
+});
+
+describe("class diagram namespaces", () => {
+  it("frames the classes declared in a namespace, titled with its name", async () => {
+    const src = "classDiagram\n  namespace BaseShapes {\n    class Triangle\n    class Rectangle\n  }\n  class Lone\n  Triangle --|> Rectangle\n  Lone --> Triangle";
+    const { data } = await renderMermaid(src);
+    expect(data).toContain('class="namespace"');
+    expect(data).toContain("BaseShapes");
+    for (const name of ["Triangle", "Rectangle", "Lone"]) expect(data).toContain(name);
+    expect((data.match(/class="namespace"/g) ?? []).length).toBe(1);
+  });
+});
+
+describe("notes in state and class diagrams", () => {
+  it("draws a state diagram's notes, single and multi-line, linked to their states", async () => {
+    const src = ["stateDiagram-v2", "  [*] --> Active", "  note right of Active : first note", "  note left of Active", "    line one", "    line two", "  end note"].join("\n");
+    const { data } = await renderMermaid(src);
+    for (const text of ["first note", "line one", "line two"]) expect(data).toContain(text);
+    expect((data.match(/note-link/g) ?? []).length).toBe(2);
+  });
+
+  it("draws a class diagram's notes, with \n as a line break and a note of its own", async () => {
+    const src = String.raw`classDiagram
+  class Animal
+  note for Animal "can fly\ncan swim"
+  note "free-standing"`;
+    const { data } = await renderMermaid(src);
+    for (const text of ["can fly", "can swim", "free-standing"]) expect(data).toContain(text);
+    expect((data.match(/class="note"/g) ?? []).length).toBe(2);
+    expect((data.match(/note-link/g) ?? []).length).toBe(1);
+  });
+});
+
+describe("gantt vertical markers", () => {
+  it("draws a `vert` task as a marker line with its name, not as a row", async () => {
+    const src = ["gantt", "  dateFormat YYYY-MM-DD", "  section S", "  Build :a1, 2024-01-01, 5d", "  Freeze :vert, v1, 2024-01-03, 0d"].join("\n");
+    const { data } = await renderMermaid(src);
+    expect(data).toContain('class="marker"');
+    expect(data).toContain("Freeze");
+    expect((data.match(/class="task"/g) ?? []).length).toBe(1);
+  });
+});
+
+describe("renderMermaid: click links", () => {
+  it("wraps a flowchart node in an <a> for click href, with tooltip and target, and ignores scripts", async () => {
+    const src = [
+      "flowchart LR",
+      "  A[Docs] --> B[Home] --> C[Bad]",
+      '  click A "https://example.com/docs?a=1&b=2" "Open the docs" _blank',
+      '  click B href "/home"',
+      '  click C "javascript:alert(1)"',
+      "  click B call doNothing()",
+    ].join("\n");
+    const { data } = await renderMermaid(src);
+    expect(data).toContain('<a href="https://example.com/docs?a=1&amp;b=2" target="_blank" title="Open the docs">');
+    expect(data).toContain('<a href="/home">');
+    expect(data).not.toContain("javascript:");
+    expect((data.match(/<a /g) ?? []).length).toBe(2);
+    expect((data.match(/<\/a>/g) ?? []).length).toBe(2);
+    expect(data).toContain("Docs"); // the node text is still drawn
+  });
+});
+
+describe("renderMermaid: state notes in a top-down diagram", () => {
+  it("sets each note beside its state, on the side named", async () => {
+    const src = ["stateDiagram-v2", "  A --> B", "  B --> C", "  note left of A : west", "  note right of B : east"].join("\n");
+    const { data } = await renderMermaid(src);
+    const boxes = new Map<string, { x: number; y: number; w: number; h: number }>();
+    for (const m of data.matchAll(/<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"[^>]*\/>\s*<text[^>]*>([^<]*)/g))
+      boxes.set(m[5], { x: +m[1], y: +m[2], w: +m[3], h: +m[4] });
+    const [a, b, west, east] = ["A", "B", "west", "east"].map((k) => boxes.get(k)!);
+    expect([a, b, west, east].every(Boolean), [...boxes.keys()].join()).toBe(true);
+    expect(west.x + west.w).toBeLessThan(a.x); // left of A
+    expect(east.x).toBeGreaterThan(b.x + b.w); // right of B
+    expect(Math.abs(west.y + west.h / 2 - (a.y + a.h / 2))).toBeLessThan(1); // level with its state
+    expect(Math.abs(east.y + east.h / 2 - (b.y + b.h / 2))).toBeLessThan(1);
   });
 });

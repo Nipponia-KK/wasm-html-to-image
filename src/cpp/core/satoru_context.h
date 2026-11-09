@@ -34,7 +34,7 @@ enum class CssChangeKind {
 // litehtml ignores @font-face, and the font manager scans the font CSS text itself, so the
 // (often huge: a Google Fonts CSS holds a rule per unicode-range subset) @font-face rules are
 // dropped from the CSS that every document creation tokenizes and parses.
-inline std::string strip_font_face_rules(const std::string& css) {
+inline std::string strip_font_face_rules_uncached(const std::string& css) {
     static const char kRule[] = "@font-face";
     if (css.find(kRule) == std::string::npos) return css;
     std::string out;
@@ -79,6 +79,19 @@ inline std::string strip_font_face_rules(const std::string& css) {
     return out;
 }
 
+// Every render builds a new context and is handed the same default web font stylesheet (111 KB), so the result for a large
+// stylesheet is remembered by its text: the scan is a per-character loop that costs about a millisecond in wasm.
+inline std::string strip_font_face_rules(const std::string& css) {
+    if (css.size() < 4096) return strip_font_face_rules_uncached(css);
+    static thread_local std::vector<std::pair<std::string, std::string>> memo;
+    for (const auto& e : memo)
+        if (e.first == css) return e.second;
+    std::string out = strip_font_face_rules_uncached(css);
+    if (memo.size() >= 4) memo.erase(memo.begin());
+    memo.emplace_back(css, out);
+    return out;
+}
+
 class SatoruContext {
     satoru::ILogger *m_logger = nullptr;
     sk_sp<SkData> m_lastPng;
@@ -101,6 +114,7 @@ class SatoruContext {
     uint64_t m_fontAliasCssVersion = 0;
     uint64_t m_generatedFontFaceCssVersion = 0;
     uint64_t m_fontVersion = 0;
+    bool m_svgDirty = false;  // fonts or images arrived since the SVG images were last drawn
     uint64_t m_imageVersion = 0;
     uint64_t m_fontResourceNamedLoadCount = 0;
     uint64_t m_fontResourceFallbackLoadCount = 0;
@@ -189,6 +203,14 @@ class SatoruContext {
 
     SatoruFontManager fontManager;
     std::map<std::string, image_info> imageCache;
+    // Characters of the <text> inside SVG images (<img>, CSS background): SkSVGDOM draws them, layout never
+    // sees them, so the font slices covering them are requested from here.
+    std::set<char32_t> svgImageCodepoints;
+    // Font families the <text> of SVG images names (requested like the families of HTML text), and the
+    // external images they reference, which the resource manager takes over to fetch.
+    std::set<std::string> svgImageFamilies;
+    bool svgImageBold = false;
+    std::vector<std::string> svgImageUrls;
     satoru::SatoruCacheManager cacheManager;
     LayoutProfile layoutProfile;
     bool needsRelayout = false;
@@ -288,14 +310,23 @@ class SatoruContext {
 
     bool load_font(const char *name, const uint8_t *data, int size, const char *url = nullptr) {
         bool changed = fontManager.loadFont(name, data, size, url);
-        if (changed) m_fontVersion++;
+        if (changed) {
+            m_fontVersion++;
+            m_svgDirty = true;
+        }
         return changed;
     }
     bool loadFont(const char *name, const uint8_t *data, int size, const char *url = nullptr) {
         bool changed = fontManager.loadFont(name, data, size, url);
-        if (changed) m_fontVersion++;
+        if (changed) {
+            m_fontVersion++;
+            m_svgDirty = true;
+        }
         return changed;
     }
+
+    /// Draw the SVG images again if fonts were loaded since they were last drawn.
+    void refreshSvgImages();
 
     void load_image(const char *name, const char *data_url, int width, int height) {
         loadImage(name, data_url, width, height);
@@ -338,6 +369,7 @@ class SatoruContext {
                                                  int stretch = 100);
     bool get_image_size(const std::string &url, int &w, int &h);
     bool get_image_ratio_only(const std::string &url);
+    bool get_image_no_ratio(const std::string &url);
 
     void set_last_png(sk_sp<SkData> png) { m_lastPng = std::move(png); }
     const sk_sp<SkData> &get_last_png() const { return m_lastPng; }

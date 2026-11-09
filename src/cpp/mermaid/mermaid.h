@@ -28,6 +28,28 @@ struct Options {
     std::string muted;    // secondary text (edge labels)
     std::string surface;  // node fill
     std::string border;   // node outline
+    std::string arrow;         // arrow heads; default: accent
+    std::string group_fill;    // body of a subgraph / cluster; default: bg
+    std::string group_header;  // header band of a subgraph; default: a faint tint of fg over bg
+    std::string label_fill;    // behind edge labels; default: bg
+    std::string composite_fill;    // body of a composite state; default: group_fill
+    std::string composite_header;  // header band of a composite state; default: none
+    std::string actor_border;      // participant boxes of a sequence diagram; default: border
+    std::string note_fill;     // notes (sequence diagram); default: a faint tint of fg over bg
+    std::string note_border;   // default: border
+    std::string note_text;     // default: fg
+    /// Series colours, comma separated (`#aaa,#bbb,...`), taken in turn by the slices of a pie chart; empty: shades of fg.
+    /// With a scale the pie is drawn as the official Mermaid one is (translucent slices, an outline in scale_stroke).
+    std::string scale;
+    std::string scale_stroke;  // outline of the pie slices; default: bg
+    /// Colours of the series of an xychart, comma separated; empty: one colour (the accent or the line colour).
+    std::string plot;
+    /// The fills of the five Cynefin domains (complex, complicated, chaotic, clear, confusion), comma separated; empty: tints of the accent.
+    std::string domains;
+    std::string label_color;     // text of the Wardley, Railroad and use case diagrams; default: fg
+    std::string cliff;           // the cliff of a Cynefin diagram; default: the line colour
+    std::string evolution;       // evolution arrows of a Wardley map; default: a red
+    std::string component_fill;  // components of a Wardley map; default: bg
     /// Paint the background rectangle. Off by default so a diagram sits on the page it is placed on.
     bool paint_background = false;
     std::string font_family = "sans-serif";
@@ -41,6 +63,10 @@ struct Options {
     ///  Recover: also a misspelt keyword and lines the diagram cannot read (skipped, and reported).
     enum class Mode { Strict, Compat, Recover };
     Mode mode = Mode::Strict;
+    /// A diagram over either limit is refused (0: no limit). The layout of a big graph grows faster than its size
+    /// (600 nodes take seconds, 1500 minutes), so an input one does not trust needs a ceiling.
+    size_t max_source_bytes = 200000;
+    size_t max_lines = 2000;  // lines with text, comments and blank lines not counted
 };
 
 /// Sets the colours of a named theme (light, dark, neutral, forest, nord, dracula, solarized-light, solarized-dark,

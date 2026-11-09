@@ -15,10 +15,12 @@ using litehtml::svgutil::trim;
 struct Task {
     std::string name, id, section;
     bool done = false, active = false, crit = false, milestone = false;
+    bool vert = false;  // a vertical marker at its start date, not a row
     // as written: a start date, "after ids", or nothing (the previous task's end); a duration or an end date
     bool has_start = false, has_end = false;
     double start = 0, end = 0, duration = 1;
     std::vector<std::string> after;
+    std::string until;  // `until id`: the end is the start of that task
 };
 
 struct Chart {
@@ -127,6 +129,7 @@ bool parse(const std::string& source, Chart& c, std::string& error) {
                 else if (p == "active") t.active = true;
                 else if (p == "crit") t.crit = true;
                 else if (p == "milestone") t.milestone = true;
+                else if (p == "vert") t.vert = true;
                 else break;
             }
             std::vector<std::string> rest(parts.begin() + k, parts.end());
@@ -159,6 +162,7 @@ bool parse(const std::string& source, Chart& c, std::string& error) {
                 at = 1;
             }
             if (parse_date(rest[at], v)) t.has_end = true, t.end = v;
+            else if (starts(rest[at], "until ")) t.until = trim(rest[at].substr(6));
             else if (!parse_duration(rest[at], t.duration)) {
                 error = "cannot read the length of a task: " + rest[at];
                 return false;
@@ -238,6 +242,16 @@ bool render_gantt(const std::string& source, const Options& options, std::string
         have_prev = true;
     }
 
+    for (Task& t : c.tasks) {
+        if (t.until.empty()) continue;
+        auto it = by_id.find(t.until);
+        if (it == by_id.end()) {
+            error = "unknown task id: " + t.until;
+            return false;
+        }
+        t.end = std::max(t.start, c.tasks[it->second].start);
+    }
+
     Theme th = make_theme(options);
     Text text{options};
     double lo = c.tasks[0].start, hi = c.tasks[0].end;
@@ -253,12 +267,18 @@ bool render_gantt(const std::string& source, const Options& options, std::string
     // one row per task, plus a header row at the start of each section
     size_t rows = c.tasks.size();
     std::string last_section = "\x01";
-    for (auto& t : c.tasks)
+    bool any_vert = false;
+    for (auto& t : c.tasks) {
+        if (t.vert) {
+            rows--, any_vert = true;
+            continue;
+        }
         if (t.section != last_section) {
             if (!t.section.empty()) rows++;
             last_section = t.section;
         }
-    double H = top + rows * kRow + kPad;
+    }
+    double H = top + rows * kRow + kPad + (any_vert ? 14 : 0);
     double W = left + kChartW + kPad;
     auto X = [&](double day) { return left + kChartW * (day - lo) / (hi - lo); };
 
@@ -284,7 +304,15 @@ bool render_gantt(const std::string& source, const Options& options, std::string
     last_section = "\x01";
     size_t band = 0;
     const std::string normal = mix(th.fg, th.bg, 45), done_fill = mix(th.fg, th.bg, 18);
+    std::string markers;
     for (auto& t : c.tasks) {
+        if (t.vert) {  // a dashed line down the chart, its name under it
+            double x = X(t.start);
+            markers += "<line class=\"marker\" x1=\"" + num(x) + "\" y1=\"" + num(top - 6) + "\" x2=\"" + num(x) + "\" y2=\"" + num(H - kPad) + "\" stroke=\"" + th.accent +
+                       "\" stroke-width=\"1.5\" stroke-dasharray=\"4 3\"/>\n";
+            centered_text(markers, th, {t.name}, x, H - kPad + 10, 10.5, 600, th.text);
+            continue;
+        }
         if (t.section != last_section) {
             last_section = t.section;
             if (!t.section.empty()) {
@@ -311,7 +339,7 @@ bool render_gantt(const std::string& source, const Options& options, std::string
         y += kRow;
     }
     // the chart's own frame
-    body += bands + grid + labels + bars + names;
+    body += bands + grid + labels + bars + markers + names;
     svg = svg_document(th, W, H, body);
     return true;
 }

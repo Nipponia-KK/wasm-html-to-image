@@ -3,12 +3,17 @@ import { program } from "commander";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { render, type OutputFormat } from "./single.js";
+import { mermaidRenderOptions } from "./mermaid.js";
 import {
   buildRenderOptions,
   inferFormat,
   isInlineHtml,
   isInlineMarkdown,
+  isInlineMermaid,
+  isMermaidInput,
   isUrlInput,
+  loadMermaidSource,
+  mermaidOptionsFromFlags,
   type CliFlags,
 } from "./cli-options.js";
 
@@ -111,9 +116,13 @@ program
   .option("--no-math", "do not typeset $...$ and $$...$$ in Markdown (done with KaTeX when it is installed)")
   .option("--markdown-theme <light|dark>", "colour scheme of the built-in Markdown stylesheet (default light)")
   .option("--markdown-css <path>", "extra CSS file appended after the built-in Markdown stylesheet")
+  .option("--mermaid", "treat the input as a Mermaid diagram (implied by a .mmd / .mermaid file; inline text and stdin need it)")
+  .option("--mermaid-theme <name>", "colour theme of a Mermaid diagram: light, dark, neutral, forest, nord, dracula, solarized-light, solarized-dark, rose-pine, sepia")
+  .option("--mermaid-mode <mode>", "how much a broken Mermaid source is forgiven: strict (default), compat, recover")
+  .option("--mermaid-directives", "honour %%{init}%% and frontmatter config (theme, themeVariables) in a Mermaid source")
   .option(
     "--js",
-    "run the page's scripts in jsdom before rendering (needs the optional dependency jsdom; trusted pages only)",
+    "run the page's scripts in QuickJS before rendering (trusted pages only)",
   )
   .option(
     "--js-wait <ms|selector>",
@@ -152,7 +161,7 @@ program
       }
 
       const isUrl = isUrlInput(input);
-      const isVirtual = isInlineHtml(input) || input === "-" || (await isInlineMarkdown(input, options));
+      const isVirtual = isInlineHtml(input) || input === "-" || (await isInlineMarkdown(input, options)) || (await isInlineMermaid(input, options));
       if (isVirtual && !options.output) {
         console.error("Error: --output is required for inline HTML or stdin input");
         process.exit(1);
@@ -199,8 +208,30 @@ program
         tocDepth: options.tocDepth,
         outline: options.outline,
         markdownCss: options.markdownCss,
+        mermaid: options.mermaid,
+        mermaidTheme: options.mermaidTheme,
+        mermaidMode: options.mermaidMode,
+        mermaidDirectives: options.mermaidDirectives,
       };
 
+      if (isMermaidInput(input, options)) {
+        // one diagram: the image is sized to it unless -w is given
+        const source = await loadMermaidSource(input, options);
+        const widthGiven = program.getOptionValueSource("width") === "cli";
+        let broken = false;
+        const drawn = await render(mermaidRenderOptions(source, {
+          ...mermaidOptionsFromFlags(flags, widthGiven),
+          onWarning: (w) => {
+            if (w.code === "MERMAID_ERROR") broken = true;
+            console.warn(`wasm-html-to-image: ${w.code}: ${w.message}`);
+          },
+        }));
+        await fs.writeFile(outputPath, typeof drawn.data === "string" ? drawn.data : Buffer.from(drawn.data));
+        console.log(`Successfully rendered to ${outputPath}`);
+        // the file holds the error box; a script still needs to know the diagram did not parse
+        if (broken) process.exit(1);
+        return;
+      }
       const result = await render(await buildRenderOptions(input, flags));
       await fs.writeFile(
         outputPath,

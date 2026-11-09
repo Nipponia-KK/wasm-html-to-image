@@ -14,13 +14,13 @@ title: Markdown 変換 (PDF / 画像)
 ## 主な機能
 
 - **`markdownToDocument()` & `markdownToHtml()`**: Markdown から HTML および PDF 用オプション（ヘッダー、フッター、タイトル等）を生成。
-- **テンプレートシステム**: 6 つの組み込みテンプレート（`default`, `report`, `proposal`, `book`, `paper`, `compact`）を提供。CSS を書かずにプロ品質のレイアウトが可能。
+- **テンプレートシステム**: 11 の組み込みテンプレート（`default`, `report`, `proposal`, `book`, `paper`, `compact`, `manual`, `minutes`, `letter`, `slides`, `invoice`）を提供。CSS を書かずにプロ品質のレイアウトが可能。
 - **自動目次（TOC）とページ番号連携**: 見出しから目次ページを自動生成。PDF レンダラーと連携して正確な開始ページ番号を自動挿入。
 - **PDF ブックマーク（アウトライン）自動生成**: `h1`〜`h6` 見出しから PDF ビューワーの目次ツリー（アウトライン）を自動構築。
 - **スマートな改ページ制御**: 見出し直後の孤立改ページ防止（`break-after: avoid`）やコードブロック・表の分断防止。
 - **YAML Front Matter**: 文書先頭のメタデータ（タイトル、著者、テンプレート、余白、スタンプ等）を自動解釈。
 - **シンタックスハイライト**: highlight.js を内蔵し、20 種類以上の主要言語のコードブロックを色分け表示。
-- **Mermaid 図**: ` ```mermaid ` をフローチャート・シーケンス・状態・クラス・ER・グラフとしてエンジン内で描画。
+- **Mermaid 図**: ` ```mermaid ` をエンジン内で描画（フローチャート、シーケンス、状態、クラス、ER、ガント、円グラフなど 30 種以上。一覧は [Mermaid 変換](./mermaid.md#6-対応している図)）。
 - **KaTeX 数式レンダリング (`/markdown-math`)**: インライン `$…$` およびブロック `$$…$$` 数式を高精度に組版。
 
 ---
@@ -92,6 +92,29 @@ const { data } = await render({
 });
 ```
 
+### 3. オプション（`MarkdownOptions`）
+
+`markdownToHtml()` と `markdownToDocument()` の第 2 引数です。
+
+| オプション | 型 | 既定値 | 説明 |
+| :--- | :--- | :--- | :--- |
+| `template` | `string \| MarkdownTemplate` | なし | 組み込みテンプレートの名前、または自作のテンプレート（[カスタムテンプレート](#カスタムテンプレート)）。フロントマターの `template:` より優先 |
+| `settings` | `DocumentSettings` | なし | フロントマターより優先する文書設定（`title`、`author`、`accent`、`font`、`page_size`、`cover`、`stamp` など） |
+| `theme` | `"light" \| "dark"` | `"light"` | 組み込みスタイルシートの配色 |
+| `css` | `string` | なし | 組み込みスタイルシートの後に追加する CSS |
+| `stylesheet` | `string` | なし | 組み込みスタイルシートを丸ごと置き換える（`theme` は無視される） |
+| `paged` | `boolean` | `false` | PDF 向け。`padding` が全ページの `@page` 余白になり、2 ページ目以降も上下の余白が保たれる |
+| `padding` | `number` | `32` | 記事の周りの余白（px） |
+| `maxWidth` | `number` | なし | 記事の最大幅（px）。省略すると表示幅いっぱい |
+| `title` | `string` | フロントマターの `title` | 文書の `<title>` |
+| `toc` | `boolean \| { depth?: number, title?: string }` | PDF（`paged`）では有効 | 目次。`depth` は 1〜6（既定 3）、`title` は目次の見出し（既定 `Contents`、空文字で省略） |
+| `highlight` | `boolean` | `true` | 言語名の付いたコードブロックをシンタックスハイライトする |
+| `mermaid` | `boolean` | `true` | ` ```mermaid ` を図として描く。`false` で通常のコードブロック |
+| `frontMatter` | `boolean` | `true` | 先頭の YAML フロントマターを取り除き、`title` を読む |
+| `math` | `MathRenderer` | なし | `$…$` / `$$…$$` の数式を組版する。`wasm-html-to-image/markdown-math` の `katexMath()` を渡す。なければ `$` は普通の文字（[KaTeX](#katex-数式組版-markdown-math)） |
+
+`markdownToDocument()` は `{ html, settings, renderOptions }` を返します。`settings` は実際に適用された設定（テンプレートの既定値 < フロントマター < オプション）、`renderOptions` は `render()` に展開して渡す PDF 用オプション（ヘッダー、フッター、`pdfTitle`、`pdfAuthor`、`pdfBackground`、`pdfSkipRunning`）です。`markdownStylesheet()` は組み込みスタイルシートの CSS だけを返します。
+
 ---
 
 ## 組み込みテンプレート
@@ -106,6 +129,11 @@ const { data } = await render({
 | `book` | 書籍・長文ドキュメント | A5、明朝/ローマン（serif）、両端揃え、各章（`h1`）ごとに改ページ、表紙、目次、フッターにページ番号 |
 | `paper` | 論文・学術・技術ノート | A4、serif、両端揃え、引き締まった行送り、フッターにページ番号 |
 | `compact` | チートシート・メモ | 12px 文字、12mm 余白、表紙・目次なし |
+| `manual` | マニュアル・仕様書 | A4、表紙、目次、見出し番号、章（`h1`）ごとに改ページ、注意書き、ヘッダーに題名、フッターにページ番号 |
+| `minutes` | 議事録 | A4、表紙・目次なし、題名に太い罫線、表ヘッダーに薄い塗り、ヘッダーに題名と日付 |
+| `letter` | 書簡・通知文 | A4、serif、広い余白、行送りゆったり、`.right` と `.center` クラスで宛名や日付を寄せる |
+| `slides` | 発表資料 | A4 横、28px の大きな文字、`h2` ごとに 1 ページ、`---` は無視、表紙つき |
+| `invoice` | 請求書・見積書 | A4、右寄せの大きな題名、アクセント色の表ヘッダー、最終行を強調、注意書きの枠 |
 
 利用可能なテンプレートは `listTemplates()` で取得できます：
 
@@ -147,6 +175,35 @@ lang: ja
 3. API オプション（`options.settings` や `options.title` 等）
 
 ---
+
+### ページと表紙の設定
+
+フロントマターでは、次の項目もページの体裁を変えます。
+
+| キー | 値 | 内容 |
+| :--- | :--- | :--- |
+| `header` / `footer` | HTML | 実行ヘッダー・フッター（テンプレートのものを置き換え）。`{{title}}`、`{{author}}`、`{{date}}`、`{{stamp}}`、`{{pageNumber}}`、`{{totalPages}}`、`{{chapter}}`（そのページにある `h1` の題名。ページに見出しが無いときは、直前の章）が使えます。`book` のヘッダーは章の題名を出します |
+| `margin` | `20mm 18mm` | ページの余白（CSS の `margin`） |
+| `orientation` | `landscape` | 用紙を横向きにする |
+| `toc_depth` | `1`〜`6` | 目次に載せる見出しの深さ |
+| `toc_title` | 文字列 | 目次ページの見出し（既定は `Contents`） |
+| `cover_style` | `band` / `plain` / `center` | 表紙の体裁 |
+| `numbering` | `true` | 見出しに `1`、`1.1`、`1.1.1` の番号を付ける |
+| `footnotes` | `end` | 脚注の置き場所。`end` は本文のあとに一覧、`page` は参照のあるページの下部（PDF 用。1 件がページの 3 分の 1 より高いと `end` に戻る） |
+| `mermaid_theme` | 名前（`nord` など） | 図の配色を名前付きテーマにする（文書のライト・ダークの色ではなく、テーマの色になる。ダークな文書には `dracula`、`nord`、`dark` などが合う） |
+| `mermaid_mode` | `compat` / `recover` | 壊れた図の許容度 |
+| `mermaid_directives` | `true` | 図の中の `%%{init}%%` と frontmatter を反映する |
+
+表紙のあるテンプレートでは、表紙にヘッダーとフッターを出しません（ページ番号の数え方は変わらず、表紙が 1 ページ目です）。
+
+## 記法の拡張
+
+- **注意書き**: `> [!NOTE]`、`> [!TIP]`、`> [!IMPORTANT]`、`> [!WARNING]`、`> [!CAUTION]` で始まる引用は、色付きの箱になります（`lang: ja` なら題名は日本語）。
+- **図の番号**: `![説明](画像 "題名")` のように題名を付けた画像は、`図 1　題名` の説明文付きの図になります。
+- **改ページ**: `<!-- pagebreak -->` の位置で改ページします。
+- **脚注**: 文中の `[^名前]` と、どこかの `[^名前]: 本文` で、文書の最後に脚注の一覧を出します（番号は初めて使った順）。
+- **表**: `report`、`proposal`、`book`、`paper` では、表が本文の幅いっぱいに広がります。
+- **長いコード行**: 行は右端で折り返します（切れません）。
 
 ## 目次（TOC）と PDF ブックマーク
 
@@ -230,32 +287,7 @@ graph LR
 
 ### JavaScript から SVG・画像として取得する
 
-`renderMermaid()` は、図のソースから SVG 文字列または画像を返します（図の大きさに合わせて自動でサイズが決まります）。
-
-```typescript
-import { renderMermaid } from "wasm-html-to-image";
-
-const { data: svg } = await renderMermaid("graph LR\n  A --> B"); // SVG 文字列
-const { data: png } = await renderMermaid("graph LR\n  A --> B", {
-  format: "png", // "svg"（既定）, "png", "webp", "pdf" など
-  theme: "dark", // "light"（既定）| "dark"
-});
-```
-
-| オプション | 既定値 | 説明 |
-| :--- | :--- | :--- |
-| `format` | `"svg"` | 出力形式。`"svg"` は文字列、それ以外は `Uint8Array` |
-| `theme` | `"light"` | 配色。`light`、`dark`、`neutral`、`forest`、`nord`、`dracula`、`solarized-light`、`solarized-dark`、`rose-pine`、`sepia` |
-| `padding` | `16` | 図の周りの余白（px） |
-| `width` | 図の幅 + 余白 | 画像の幅（px） |
-| `background` | SVG は透明、画像はテーマの背景色 | ページの背景（CSS の色） |
-| `accent` | テーマから算出 | 矢印やバーの色 |
-| `directives` | `false` | 本文の `%%{init: {...}}%%` と frontmatter の `config:`（`theme`、`themeVariables`）を反映します |
-| `mode` | `"strict"` | 誤りの許容度。`"compat"` は図種名の大文字小文字、BOM・CRLF、閉じ忘れた `end` / `}` を許し、`"recover"` はさらに図種名の綴り違いを直し、読めない行を飛ばします |
-
-`strict` でも、図種名が綴り違いのときは、エラー枠に「`flowchart` のことですか?」と候補が表示されます。ページの CSS からテーマを選ぶときは `--mermaid-theme: nord` を使い、`--mermaid-bg` などの個別の色はその上に重ねて指定できます。モードは `--mermaid-mode: compat`（または `recover`）を使います。
-
-Workers 向けのエントリ（`/workerd`、`/edge-light`）では、`renderMermaidWith((options) => render(options, wasm), source, options)` を使います。HTML ページとして使いたい場合は `mermaidToHtml(source, options)` が、図を 1 つ含む HTML を返します。
+図だけを SVG 文字列や画像として取り出す `renderMermaid()`、テーマ、入力の補正、CSS からの指定は、[Mermaid 変換](./mermaid.md) にまとめています。
 
 ## KaTeX 数式組版 (`/markdown-math`)
 
@@ -313,3 +345,26 @@ const myTemplate = {
 
 const doc = markdownToDocument(md, { template: myTemplate, paged: true });
 ```
+
+### 組み込みテンプレートを土台にする（`extends`）
+
+`extends` に組み込みテンプレートの名前を書くと、その `type`、`page`、`defaults` を項目ごとに上書きできます。`css` は土台のものの後ろに足されます。`defineTemplate()` は型を確認するだけで、値はそのまま返します。
+
+```typescript
+import { defineTemplate, markdownToDocument } from "wasm-html-to-image/markdown";
+
+const mine = defineTemplate({
+  extends: "report",
+  type: { size: 13 },
+  defaults: { accent: "#0f766e" },
+  css: ".markdown-body h2 { border-bottom-style: dashed; }",
+});
+
+const doc = markdownToDocument(md, { template: mine, paged: true });
+```
+
+CLI では、JSON ファイルに `{ "extends": "report", "defaults": { "accent": "#0f766e" } }` と書いて `--template mine.json` で渡せます。
+
+### 色は CSS 変数で書く
+
+テンプレートの `css` では、色を直書きせず、`var(--surface)`、`var(--border)`、`var(--muted)`、`var(--text)`、`var(--accent)` を使ってください。ライトとダークのどちらのテーマでも、配色が追従します。

@@ -81,6 +81,10 @@ export const DIAGNOSTIC_CODES = {
   COLLECT_RESOURCES_FAILED: "COLLECT_RESOURCES_FAILED",
   JS_LOG_FORWARD_FAILED: "JS_LOG_FORWARD_FAILED",
   PDF_MERGE_FAILED: "PDF_MERGE_FAILED",
+  /** A Mermaid diagram that did not parse (shown as an error box). */
+  MERMAID_ERROR: "MERMAID_ERROR",
+  /** A Mermaid source the input repair (`compat` / `recover`) had to change. */
+  MERMAID_RECOVERED: "MERMAID_RECOVERED",
 } as const;
 
 /**

@@ -37,6 +37,30 @@ export interface DocumentSettings {
   lang?: string;
   /** `ltr`, `rtl` or `auto`. */
   dir?: string;
+  /** Running header HTML for this document (replaces the template's); `{{title}}`, `{{pageNumber}}`, ... work. */
+  header?: string;
+  /** Running footer HTML for this document (replaces the template's). */
+  footer?: string;
+  /** Page margin: a CSS `margin` value such as `20mm 18mm`. */
+  margin?: string;
+  /** `portrait` or `landscape`. */
+  orientation?: string;
+  /** Deepest heading level listed in the contents (1 to 6). */
+  toc_depth?: number;
+  /** Heading of the contents page (`Contents`). */
+  toc_title?: string;
+  /** Number the headings: `1`, `1.1`, `1.1.1`. */
+  numbering?: boolean;
+  /** Where footnotes go in a PDF: `end` (a list after the text, the default) or `page` (the foot of the page that refers to them). */
+  footnotes?: string;
+  /** Colour theme of the Mermaid diagrams (`nord`, `dracula`, ...) instead of the document's light / dark colours. */
+  mermaid_theme?: string;
+  /** How much a broken diagram is forgiven: `strict`, `compat` or `recover`. */
+  mermaid_mode?: string;
+  /** Honour `%%{init}%%` and frontmatter `config:` inside the diagrams. */
+  mermaid_directives?: boolean;
+  /** Look of the cover: `band` (a bar at the left), `plain`, or `center`. A template picks its own. */
+  cover_style?: string;
 }
 
 /** Typography and structure of a template. Every field has a default, so a template lists only what differs. */
@@ -64,6 +88,8 @@ export interface TemplateType {
   chapterBreak: boolean;
   /** Corner radius of code blocks and inline code, px. */
   radius: number;
+  /** Tables span the text width, and their header cells keep to one line (reports, proposals, books). */
+  wideTables: boolean;
 }
 
 export interface TemplatePage {
@@ -71,13 +97,15 @@ export interface TemplatePage {
   size: string;
   /** Page margin: a CSS `margin` value, e.g. `20mm 18mm`. */
   margin: string;
-  /** Running header HTML: `{{pageNumber}}`, `{{totalPages}}`, `{{title}}`, `{{author}}`, `{{date}}`, `{{stamp}}`. */
+  /** Running header HTML: `{{pageNumber}}`, `{{totalPages}}`, `{{chapter}}` (the h1 the page is in), `{{title}}`, `{{author}}`, `{{date}}`, `{{stamp}}`. */
   header?: string;
   /** Running footer HTML, same variables. */
   footer?: string;
 }
 
 export interface MarkdownTemplate {
+  /** Start from a bundled template (`"report"`): this one's `type`, `page` and `defaults` are laid over it field by field, and its `css` follows the base's. */
+  extends?: string;
   /** One line for `listTemplates()`. */
   description?: string;
   type?: Partial<TemplateType>;
@@ -99,6 +127,7 @@ export const DEFAULT_TYPE: TemplateType = {
   accentHeadings: false,
   chapterBreak: false,
   radius: 6,
+  wideTables: false,
 };
 
 export const DEFAULT_PAGE: TemplatePage = { size: "A4", margin: "32px" };
@@ -118,8 +147,21 @@ const KNOWN_KEYS = new Set<string>([
   "stamp",
   "lang",
   "dir",
+  "header",
+  "footer",
+  "margin",
+  "orientation",
+  "toc_depth",
+  "toc_title",
+  "cover_style",
+  "numbering",
+  "footnotes",
+  "mermaid_theme",
+  "mermaid_mode",
+  "mermaid_directives",
 ]);
-const BOOLEAN_KEYS = new Set(["toc", "cover"]);
+const BOOLEAN_KEYS = new Set(["toc", "cover", "numbering", "mermaid_directives"]);
+const NUMBER_KEYS = new Set(["toc_depth"]);
 
 /**
  * The flat `key: value` lines of a front matter block. Values may be quoted; `toc` and `cover` take
@@ -128,7 +170,7 @@ const BOOLEAN_KEYS = new Set(["toc", "cover"]);
  * `page_size`.
  */
 export function parseFrontMatter(block: string): DocumentSettings {
-  const out: Record<string, string | boolean> = {};
+  const out: Record<string, string | boolean | number> = {};
   for (const line of block.split(/\r?\n/)) {
     const m = /^([A-Za-z_][\w-]*):[ \t]*(.*?)[ \t]*$/.exec(line);
     if (!m) continue; // blank, comment, indented (nested) or a list item
@@ -141,6 +183,9 @@ export function parseFrontMatter(block: string): DocumentSettings {
     if (value === "") continue;
     if (BOOLEAN_KEYS.has(key)) {
       if (!quoted && (value === "true" || value === "false")) out[key] = value === "true";
+    } else if (NUMBER_KEYS.has(key)) {
+      const n = Number(value);
+      if (Number.isInteger(n) && n >= 1 && n <= 6) out[key] = n;
     } else out[key] = value;
   }
   return out as DocumentSettings;
@@ -184,7 +229,7 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
 
   report: {
     description: "Business document: cover, contents, the title in the header and the page number in the footer",
-    type: { size: 15, lineHeight: 1.65, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 4 },
+    type: { size: 15, lineHeight: 1.65, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 4, wideTables: true },
     page: {
       margin: "26mm 22mm 24mm",
       header: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-top:8mm"><span>{{title}}</span><span>{{stamp}}</span></div>`,
@@ -198,7 +243,7 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
 
   proposal: {
     description: "Proposal / quotation: cover, accent bars on sections, tinted table headers and call-out quotes",
-    type: { size: 14, lineHeight: 1.7, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 4 },
+    type: { size: 14, lineHeight: 1.7, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 4, wideTables: true },
     page: {
       margin: "24mm 20mm 22mm",
       header: `<div style="${RUNNING}text-align:right;padding-top:8mm">{{stamp}}</div>`,
@@ -208,17 +253,18 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
     css: `.markdown-body h1 { margin-top: 36px; padding: 2px 0 2px 12px; border-left: 6px solid var(--accent, #0f766e); font-size: 1.7em; }
 .markdown-body h2 { margin-top: 28px; font-size: 1.25em; }
 .markdown-body th { color: #ffffff; background: var(--accent, #0f766e); }
-.markdown-body tr:nth-child(2n) { background: #f1f5f9; }
-.markdown-body blockquote { padding: 10px 16px; border-left: 4px solid var(--accent, #0f766e); background: #f1f5f9; }
+.markdown-body tr:nth-child(2n) { background: var(--surface, #f1f5f9); }
+.markdown-body blockquote { padding: 10px 16px; border-left: 4px solid var(--accent, #0f766e); background: var(--surface, #f1f5f9); }
 .cover { margin: 70mm 0 0; padding: 0 0 0 14px; border-left: 8px solid var(--accent, #0f766e); }`,
   },
 
   book: {
     description: "Book: serif text, justified, every chapter (h1) on a new page, inner-margin friendly page",
-    type: { font: "serif", size: 15, lineHeight: 1.8, justify: true, h1Rule: false, h2Rule: false, headingWeight: 700, chapterBreak: true, radius: 3 },
+    type: { font: "serif", size: 15, lineHeight: 1.8, justify: true, h1Rule: false, h2Rule: false, headingWeight: 700, chapterBreak: true, radius: 3, wideTables: true },
     page: {
       size: "A5",
       margin: "20mm 17mm 22mm",
+      header: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-top:9mm"><span>{{title}}</span><span>{{chapter}}</span></div>`,
       footer: `<div style="${RUNNING}text-align:center;padding-bottom:9mm">{{pageNumber}}</div>`,
     },
     defaults: { cover: true, toc: true, accent: "#7c2d12" },
@@ -232,7 +278,7 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
 
   paper: {
     description: "Paper / technical note: serif, justified, tight leading, numbers in the footer",
-    type: { font: "serif", size: 13, lineHeight: 1.55, justify: true, h1Rule: false, h2Rule: false, headingWeight: 700, radius: 2 },
+    type: { font: "serif", size: 13, lineHeight: 1.55, justify: true, h1Rule: false, h2Rule: false, headingWeight: 700, radius: 2, wideTables: true },
     page: {
       margin: "22mm 20mm",
       footer: `<div style="${RUNNING}text-align:center;padding-bottom:8mm">{{pageNumber}}</div>`,
@@ -257,6 +303,87 @@ export const TEMPLATES: Record<string, MarkdownTemplate> = {
 .markdown-body th, .markdown-body td { padding: 3px 8px; }
 .markdown-body pre { padding: 8px 10px; }`,
   },
+
+  manual: {
+    description: "Manual / specification: chapters on new pages, numbered headings, cover, contents, call-outs",
+    type: { size: 14, lineHeight: 1.7, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, chapterBreak: true, radius: 4, wideTables: true },
+    page: {
+      margin: "24mm 20mm 22mm",
+      header: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-top:8mm"><span>{{title}}</span><span>{{stamp}}</span></div>`,
+      footer: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-bottom:8mm"><span>{{author}}</span><span>{{pageNumber}} / {{totalPages}}</span></div>`,
+    },
+    defaults: { cover: true, toc: true, numbering: true, accent: "#0369a1" },
+    css: `.markdown-body h1 { margin: 0 0 20px; padding-bottom: 8px; font-size: 1.8em; border-bottom: 3px solid var(--accent, #0369a1); }
+.markdown-body h2 { margin-top: 28px; padding-bottom: 4px; font-size: 1.3em; border-bottom: 1px solid var(--border); }
+.markdown-body h3 { margin-top: 22px; font-size: 1.1em; }
+.markdown-body th { background: var(--surface); }
+.markdown-body pre { border-left: 3px solid var(--accent, #0369a1); }
+.cover { margin: 55mm 0 0; padding-left: 14px; border-left: 8px solid var(--accent, #0369a1); }`,
+  },
+
+  minutes: {
+    description: "Meeting minutes: no cover, a ruled title, tinted table headers, check lists for the to-dos",
+    type: { size: 13, lineHeight: 1.65, h1Rule: false, h2Rule: false, accentHeadings: false, headingWeight: 700, radius: 4, wideTables: true },
+    page: {
+      margin: "22mm 20mm 20mm",
+      header: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-top:8mm"><span>{{title}}</span><span>{{date}}</span></div>`,
+      footer: `<div style="${RUNNING}text-align:right;padding-bottom:8mm">{{pageNumber}} / {{totalPages}}</div>`,
+    },
+    defaults: { cover: false, toc: false, accent: "#475569" },
+    css: `.markdown-body h1 { margin: 0 0 16px; padding-bottom: 8px; font-size: 1.6em; border-bottom: 2px solid var(--accent, #475569); }
+.markdown-body h2 { margin-top: 22px; margin-bottom: 8px; padding-left: 10px; font-size: 1.1em; border-left: 4px solid var(--accent, #475569); }
+.markdown-body th { background: var(--surface); }
+.markdown-body ul { margin-bottom: 10px; }`,
+  },
+
+  letter: {
+    description: "Business letter: serif, wide margins, no cover or contents; .right and .center classes for the address block",
+    type: { font: "serif", size: 14, lineHeight: 1.9, h1Rule: false, h2Rule: false, headingWeight: 700, radius: 2 },
+    page: { margin: "28mm 25mm 25mm" },
+    defaults: { cover: false, toc: false },
+    css: `.markdown-body h1 { margin: 1.4em 0 1.2em; font-size: 1.4em; text-align: center; letter-spacing: 0.2em; }
+.markdown-body h2 { margin: 1.4em 0 0.4em; font-size: 1.1em; }
+.markdown-body p { margin-bottom: 1em; }
+.markdown-body .right { text-align: right; }
+.markdown-body .center { text-align: center; }
+.markdown-body hr { margin: 1.6em 0; border-top: 1px solid var(--border); }`,
+  },
+
+  slides: {
+    description: "Slide-like pages: A4 landscape, large text, each h2 on its own page (a --- rule is ignored)",
+    type: { size: 28, lineHeight: 1.5, h1Rule: false, h2Rule: false, accentHeadings: true, headingWeight: 700, radius: 6, wideTables: true },
+    page: {
+      size: "A4 landscape",
+      margin: "16mm 20mm 18mm",
+      footer: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-bottom:7mm"><span>{{title}}</span><span>{{pageNumber}}</span></div>`,
+    },
+    defaults: { cover: true, toc: false, accent: "#1d4ed8" },
+    css: `.markdown-body h1 { margin: 0 0 0.6em; font-size: 2.2em; break-before: page; }
+.markdown-body h2 { margin: 0 0 0.6em; padding-bottom: 6px; font-size: 1.6em; border-bottom: 3px solid var(--accent, #1d4ed8); break-before: page; }
+.markdown-body h1 + h2 { break-before: auto; }
+.markdown-body h3 { font-size: 1.2em; }
+.markdown-body hr { display: none; }
+.markdown-body li + li { margin-top: 0.4em; }
+.cover { margin: 40mm 0 0; padding-left: 18px; border-left: 10px solid var(--accent, #1d4ed8); }
+.cover-title { font-size: 2.4em; }`,
+  },
+
+  invoice: {
+    description: "Invoice / quotation: a title at the right, a ruled items table with the total emphasised, notes in a box",
+    type: { size: 13, lineHeight: 1.6, h1Rule: false, h2Rule: false, accentHeadings: false, headingWeight: 700, radius: 4, wideTables: true },
+    page: {
+      margin: "22mm 20mm 20mm",
+      header: `<div style="${RUNNING}text-align:right;padding-top:8mm">{{stamp}}</div>`,
+      footer: `<div style="${RUNNING}display:flex;justify-content:space-between;padding-bottom:8mm"><span>{{author}}</span><span>{{pageNumber}} / {{totalPages}}</span></div>`,
+    },
+    defaults: { cover: false, toc: false, accent: "#0f172a" },
+    css: `.markdown-body h1 { margin: 0 0 24px; font-size: 2em; text-align: right; letter-spacing: 0.3em; }
+.markdown-body h2 { margin-top: 24px; margin-bottom: 8px; padding-bottom: 4px; font-size: 1.05em; border-bottom: 2px solid var(--accent, #0f172a); }
+.markdown-body th { color: #ffffff; background: var(--accent, #0f172a); }
+.markdown-body tr:nth-child(2n) { background: transparent; }
+.markdown-body tr:last-child td { font-weight: 700; background: var(--surface); }
+.markdown-body .right { text-align: right; }`,
+  },
 };
 
 /** The names of the bundled templates, each with its one-line description. */
@@ -264,10 +391,25 @@ export function listTemplates(): { name: string; description: string }[] {
   return Object.entries(TEMPLATES).map(([name, t]) => ({ name, description: t.description ?? "" }));
 }
 
+/** A template that `extends` a bundled one, flattened: its own fields laid over the base's. */
+function extend(t: MarkdownTemplate): MarkdownTemplate {
+  const base = resolveTemplate(t.extends);
+  return {
+    description: t.description ?? base.description,
+    type: { ...base.type, ...t.type },
+    page: { ...base.page, ...t.page },
+    defaults: { ...base.defaults, ...t.defaults },
+    css: [base.css, t.css].filter(Boolean).join("\n"),
+  };
+}
+
+/** Type-checks a template you write (`extends`, `type`, `page`, `defaults`, `css`) and returns it unchanged. */
+export const defineTemplate = (template: MarkdownTemplate): MarkdownTemplate => template;
+
 /** A template by name (a bundled one) or as given. An unknown name is an error that lists the choices. */
 export function resolveTemplate(template: string | MarkdownTemplate | undefined): MarkdownTemplate {
   if (template === undefined) return TEMPLATES.default;
-  if (typeof template !== "string") return template;
+  if (typeof template !== "string") return template.extends === undefined ? template : extend(template);
   const found = TEMPLATES[template];
   if (!found) throw new Error(`unknown template "${template}". Choose from: ${Object.keys(TEMPLATES).join(", ")}`);
   return found;

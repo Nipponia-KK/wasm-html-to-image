@@ -1,0 +1,1176 @@
+// getComputedStyle and document.styleSheets: the style sheets of the page's <style> elements and the style attributes,
+// cascaded (importance, specificity, order), inherited, with the browser's defaults for display and a few others.
+// Lengths come out in px (em / rem / absolute units; calc(), min(), max(), clamp() when they hold no percentages), custom
+// properties are inherited and substituted by var(), <link rel=stylesheet> sheets count once the host has loaded them,
+// and document.adoptedStyleSheets count as soon as they are assigned. @supports is evaluated like CSS.supports; @layer
+// blocks cascade as ordinary rules (layer order is not modelled) and @container is not evaluated (it needs a layout).
+// Not computed: layout (sizes stay "auto" or as declared), percentages, pseudo-elements.
+(function (g) {
+  var D = g.__native.dom;
+
+  // ---- CSS text -> rules
+  var skipString = function (s, i) {
+    var q = s.charAt(i);
+    for (i++; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === "\\") i++;
+      else if (c === q) return i;
+    }
+    return s.length;
+  };
+  var stripComments = function (s) {
+    var out = "", i = 0;
+    while (i < s.length) {
+      var c = s.charAt(i);
+      if (c === "/" && s.charAt(i + 1) === "*") {
+        var e = s.indexOf("*/", i + 2);
+        i = e < 0 ? s.length : e + 2;
+      } else if (c === '"' || c === "'") {
+        var j = skipString(s, i);
+        out += s.slice(i, j + 1);
+        i = j + 1;
+      } else {
+        out += c;
+        i++;
+      }
+    }
+    return out;
+  };
+  // index of the first `stop` outside strings, parentheses and brackets (or s.length)
+  var findTop = function (s, from, stops) {
+    var depth = 0;
+    for (var i = from; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === '"' || c === "'") i = skipString(s, i);
+      else if (c === "(" || c === "[") depth++;
+      else if (c === ")" || c === "]") depth--;
+      else if (depth <= 0 && stops.indexOf(c) >= 0) return i;
+    }
+    return s.length;
+  };
+  var matchingBrace = function (s, open) {
+    var depth = 0;
+    for (var i = open; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (c === '"' || c === "'") i = skipString(s, i);
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) return i;
+    }
+    return s.length;
+  };
+  var splitTop = function (s, sep) {
+    var out = [], from = 0;
+    for (;;) {
+      var i = findTop(s, from, sep);
+      out.push(s.slice(from, i));
+      if (i >= s.length) return out;
+      from = i + 1;
+    }
+  };
+
+  var SIDES = ["top", "right", "bottom", "left"];
+  var four = function (v) {
+    var p = v.trim().split(/\s+/);
+    if (p.length === 1) return [p[0], p[0], p[0], p[0]];
+    if (p.length === 2) return [p[0], p[1], p[0], p[1]];
+    if (p.length === 3) return [p[0], p[1], p[2], p[1]];
+    return p.slice(0, 4);
+  };
+  var BORDER_STYLES = "none hidden dotted dashed solid double groove ridge inset outset".split(" ");
+  var borderParts = function (v) {
+    var width = "medium", style = "none", color = "currentcolor";
+    splitTop(v.trim(), " ").filter(Boolean).forEach(function (t) {
+      if (BORDER_STYLES.indexOf(t) >= 0) style = t;
+      else if (/^[0-9.]|^(thin|medium|thick)$|^calc\(/.test(t)) width = t;
+      else color = t;
+    });
+    return [width, style, color];
+  };
+  // a shorthand becomes its longhands
+  var expand = function (prop, value) {
+    var i, out = [], v = value.trim();
+    if (prop === "margin" || prop === "padding") {
+      var f = four(v);
+      for (i = 0; i < 4; i++) out.push([prop + "-" + SIDES[i], f[i]]);
+      return out;
+    }
+    if (prop === "inset") {
+      var s = four(v);
+      for (i = 0; i < 4; i++) out.push([SIDES[i], s[i]]);
+      return out;
+    }
+    if (prop === "border-width" || prop === "border-style" || prop === "border-color") {
+      var kind = prop.slice(7), b = four(v);
+      for (i = 0; i < 4; i++) out.push(["border-" + SIDES[i] + "-" + kind, b[i]]);
+      return out;
+    }
+    if (prop === "border") {
+      var parts = borderParts(v);
+      for (i = 0; i < 4; i++) out.push(["border-" + SIDES[i] + "-width", parts[0]], ["border-" + SIDES[i] + "-style", parts[1]], ["border-" + SIDES[i] + "-color", parts[2]]);
+      return out;
+    }
+    var side = /^border-(top|right|bottom|left)$/.exec(prop);
+    if (side) {
+      var q = borderParts(v);
+      return [[prop + "-width", q[0]], [prop + "-style", q[1]], [prop + "-color", q[2]]];
+    }
+    if (prop === "overflow") {
+      var o = v.split(/\s+/);
+      return [["overflow-x", o[0]], ["overflow-y", o[1] || o[0]]];
+    }
+    if (prop === "background") {
+      var color = splitTop(v, " ").filter(Boolean).filter(function (t) { return /^(#|rgb|hsl)|^[a-z]+$/i.test(t) && !/^(none|repeat|no-repeat|fixed|scroll|local|center|top|left|right|bottom|cover|contain|inherit|initial|unset)$/i.test(t); });
+      return [["background", v]].concat(color.length === 1 ? [["background-color", color[0]]] : []);
+    }
+    if (prop === "flex-flow") return [["flex-flow", v]];
+    return [[prop, v]];
+  };
+  var parseDeclarations = function (block) {
+    var out = [];
+    splitTop(block, ";").forEach(function (d) {
+      var c = findTop(d, 0, ":");
+      if (c >= d.length) return;
+      var prop = d.slice(0, c).trim().toLowerCase(), value = d.slice(c + 1).trim(), important = false;
+      var m = /\s*!\s*important\s*$/i.exec(value);
+      if (m) { important = true; value = value.slice(0, m.index).trim(); }
+      if (!prop || value === "") return;
+      if (prop.slice(0, 2) === "--") out.push([prop, value, important]);
+      else if (value.indexOf("var(") >= 0) out.push([prop, value, important, true]); // expanded once the variables are known
+      else expand(prop, value).forEach(function (e) { out.push([e[0], e[1], important]); });
+    });
+    return out;
+  };
+
+  // specificity of one complex selector: [ids, classes/attributes/pseudo-classes, types/pseudo-elements]
+  var specificity = function (sel) {
+    var a = 0, b = 0, c = 0, i = 0, n = sel.length;
+    var ident = function () { var j = i; while (j < n && /[\w\- -￿]|\\./.test(sel.charAt(j))) j += sel.charAt(j) === "\\" ? 2 : 1; var t = sel.slice(i, j); i = j; return t; };
+    var last = -1;
+    while (i < n) {
+      if (i === last) i++; // a token that consumed nothing (a lone backslash) must not hold the loop
+      last = i;
+      if (i >= n) break;
+      var ch = sel.charAt(i);
+      if (ch === "#") { i++; ident(); a++; }
+      else if (ch === ".") { i++; ident(); b++; }
+      else if (ch === "[") { i = findTop(sel, i + 1, "]") + 1; b++; }
+      else if (ch === ":") {
+        if (sel.charAt(i + 1) === ":") { i += 2; ident(); c++; continue; }
+        i++;
+        var name = ident().toLowerCase();
+        if (sel.charAt(i) === "(") {
+          var close = findTop(sel, i + 1, ")");
+          var arg = sel.slice(i + 1, close);
+          i = close + 1;
+          if (name === "where") continue;
+          if (name === "is" || name === "not" || name === "has" || name === "matches") {
+            var best = [0, 0, 0];
+            splitTop(arg, ",").forEach(function (one) {
+              var sp = specificity(one.trim());
+              if (sp[0] > best[0] || (sp[0] === best[0] && (sp[1] > best[1] || (sp[1] === best[1] && sp[2] > best[2])))) best = sp;
+            });
+            a += best[0]; b += best[1]; c += best[2];
+          } else b++;
+        } else if (name === "before" || name === "after" || name === "first-line" || name === "first-letter") c++;
+        else b++;
+      } else if (ch === "*" || ch === ">" || ch === "+" || ch === "~" || ch === " " || ch === "\t" || ch === "\n" || ch === "|") i++;
+      else if (/[\w\-\\]/.test(ch)) { ident(); c++; }
+      else i++;
+    }
+    return [a, b, c];
+  };
+  var weight = function (sp) { return sp[0] * 1000000 + sp[1] * 1000 + sp[2]; };
+
+  // @supports asks the same CSS.supports the page sees (boot.js), so a sheet and a script agree on a feature
+  var supportsOk = function (condition) {
+    try {
+      return !!(g.CSS && typeof g.CSS.supports === "function" && g.CSS.supports(String(condition || "")));
+    } catch (e) {
+      return false;
+    }
+  };
+  // rules: { selector, weight, decls, media }
+  var parseSheet = function (text) {
+    var rules = [];
+    var run = function (s, media) {
+      var i = 0;
+      while (i < s.length) {
+        while (i < s.length && /\s/.test(s.charAt(i))) i++;
+        if (i >= s.length) break;
+        if (s.charAt(i) === "@") {
+          var nameEnd = i + 1;
+          while (nameEnd < s.length && /[\w\-]/.test(s.charAt(nameEnd))) nameEnd++;
+          var at = s.slice(i + 1, nameEnd).toLowerCase();
+          var stop = findTop(s, nameEnd, ";{");
+          if (s.charAt(stop) !== "{") { i = stop + 1; continue; }
+          var end = matchingBrace(s, stop);
+          if (at === "media") run(s.slice(stop + 1, end), media.concat([s.slice(nameEnd, stop).trim()]));
+          else if (at === "supports") {
+            if (supportsOk(s.slice(nameEnd, stop).trim())) run(s.slice(stop + 1, end), media);
+          } else if (at === "layer") {
+            // A layer block still cascades as ordinary rules. Layer priority (an unlayered rule beating a layered one,
+            // and the order between layers) is a non-goal here: no rule is dropped, but the ordering may differ.
+            run(s.slice(stop + 1, end), media);
+          } else if (at === "container") {
+            // @container needs the size of a query container, which this layout-free engine does not have. The rules are
+            // left out rather than applied unconditionally (a non-goal; the renderer's own layout evaluates them).
+          }
+          i = end + 1;
+          continue;
+        }
+        var open = findTop(s, i, "{");
+        if (open >= s.length) break;
+        var close = matchingBrace(s, open);
+        var prelude = s.slice(i, open).trim(), decls = parseDeclarations(s.slice(open + 1, close));
+        i = close + 1;
+        if (!prelude) continue;
+        splitTop(prelude, ",").forEach(function (one) {
+          one = one.trim();
+          if (one) rules.push({ selector: one, weight: weight(specificity(one)), decls: decls, media: media, text: prelude });
+        });
+      }
+    };
+    run(stripComments(text), []);
+    return rules;
+  };
+  // parsed once per text; a page with thousands of <style> elements (CSS-in-JS) must not lose them to a small cap
+  var parsed = new Map(), parsedChars = 0;
+  var rulesOf = function (text) {
+    var r = parsed.get(text);
+    if (!r) {
+      r = parseSheet(text);
+      if (parsedChars > 4000000) { parsed.clear(); parsedChars = 0; }
+      parsed.set(text, r);
+      parsedChars += text.length;
+    }
+    return r;
+  };
+  var mediaOk = function (media) {
+    for (var i = 0; i < media.length; i++) {
+      try { if (typeof g.matchMedia === "function" && !g.matchMedia(media[i]).matches) return false; } catch (e) { return false; }
+    }
+    return true;
+  };
+
+  // the rules of a document's <style> elements in order, kept while the document is as it was
+  var sheetCache = new WeakMap();
+  // the text of <link rel=stylesheet> sheets, which the host fetches and hands over (see __edgeLinks)
+  var linkSheets = new WeakMap();
+  var linkEls = [];
+  g.__edgeLinks = function () {
+    var out = [];
+    linkEls = Array.prototype.slice.call(g.document.querySelectorAll("link[href]")).filter(function (l) { return /(^|\s)stylesheet(\s|$)/i.test(l.getAttribute("rel") || ""); });
+    linkEls.forEach(function (l, i) { out.push({ i: i, href: l.getAttribute("href") }); });
+    return JSON.stringify(out);
+  };
+  g.__edgeSetSheet = function (i, text) {
+    var l = linkEls[i];
+    if (!l) return;
+    linkSheets.set(l, text);
+    sheetCache = new WeakMap();
+    memo = { v: -1, m: new WeakMap() };
+  };
+  // the document's adopted style sheets are part of the cascade but are not serialized (shadow roots are separate)
+  var adoptedSheetsOf = function (root) {
+    try { return root && root.adoptedStyleSheets ? Array.prototype.slice.call(root.adoptedStyleSheets) : []; } catch (e) { return []; }
+  };
+  var sheetText = function (sheet) { return sheet && typeof sheet._text === "string" ? sheet._text : ""; };
+  // replaceSync / insertRule / deleteRule change a sheet without a DOM mutation: its revision (and length, for a sheet
+  // this file did not make) is part of the cache key, without copying a large sheet's text on every style read
+  var sheetMark = function (sheet) {
+    if (sheet && typeof sheet._rev === "number") return sheet._rev + ":" + sheetText(sheet).length;
+    return sheetText(sheet);
+  };
+  var adoptedSignature = function (root) {
+    var list = adoptedSheetsOf(root), sig = "";
+    for (var i = 0; i < list.length; i++) sig += (list[i] && list[i].disabled ? "1" : "0") + sheetMark(list[i]) + "\u0000";
+    return sig;
+  };
+  var documentRules = function (doc) {
+    var v = D.version(), adopted = adoptedSheetsOf(doc), sig = adoptedSignature(doc);
+    var have = sheetCache.get(doc);
+    if (have && have.v === v && have.sig === sig) return have.rules;
+    var rules = [], order = 0;
+    var styles = doc.querySelectorAll("style, link");
+    for (var i = 0; i < styles.length; i++) {
+      var st = styles[i];
+      if (st.hasAttribute("disabled")) continue;
+      var type = st.getAttribute("type");
+      if (type && type.toLowerCase() !== "text/css") continue;
+      var m = st.getAttribute("media");
+      var base = m ? [m] : [];
+      var css = st.localName === "link" ? linkSheets.get(st) : st.textContent;
+      if (css === undefined) continue;
+      rulesOf(css).forEach(function (r) { rules.push({ selector: r.selector, weight: r.weight, decls: r.decls, media: base.concat(r.media), order: order++ }); });
+    }
+    // adopted sheets come after the document's own sheets, in adoptedStyleSheets order
+    for (var j = 0; j < adopted.length; j++) {
+      var sh = adopted[j];
+      if (!sh || sh.disabled) continue;
+      var mt = sh.media && sh.media.mediaText ? [sh.media.mediaText] : [];
+      (function (base) {
+        rulesOf(sheetText(sh)).forEach(function (r) { rules.push({ selector: r.selector, weight: r.weight, decls: r.decls, media: base.concat(r.media), order: order++ }); });
+      })(mt);
+    }
+    sheetCache.set(doc, { v: v, sig: sig, rules: rules });
+    return rules;
+  };
+
+  // ---- defaults: the browser's own style sheet, as far as it matters to scripts
+  var BLOCK = "address article aside blockquote body center dd details dialog dir div dl dt fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 header hgroup hr html legend main menu nav ol p pre section summary ul xmp".split(" ");
+  var NONE = "area base basefont datalist head link meta noembed noframes param rp script style template title".split(" ");
+  var uaDisplay = function (el) {
+    var t = el.localName;
+    if (el.hasAttribute("hidden") && !(t === "input" && el.getAttribute("type") === "hidden" && false)) return "none";
+    if (t === "input" && (el.getAttribute("type") || "").toLowerCase() === "hidden") return "none";
+    if (NONE.indexOf(t) >= 0) return "none";
+    if (BLOCK.indexOf(t) >= 0) return "block";
+    switch (t) {
+      case "li": return "list-item";
+      case "table": return "table";
+      case "tr": return "table-row";
+      case "thead": return "table-header-group";
+      case "tbody": return "table-row-group";
+      case "tfoot": return "table-footer-group";
+      case "td": case "th": return "table-cell";
+      case "caption": return "table-caption";
+      case "col": return "table-column";
+      case "colgroup": return "table-column-group";
+      case "input": case "select": case "button": case "audio": case "object": return "inline-block";
+      case "option": case "optgroup": return "block";
+      case "ruby": return "ruby";
+      case "rt": return "ruby-text";
+      default: return "inline";
+    }
+  };
+  var BIDI = "address blockquote center div figure figcaption footer form header hr legend listing main p plaintext pre summary xmp article aside hgroup nav search section table caption colgroup col thead tbody tfoot tr td th dir dd dl dt menu ol ul li bdi output".split(" ");
+  var uaStyle = function (el) {
+    var t = el.localName, o = { display: uaDisplay(el) };
+    if (t === "b" || t === "strong" || t === "th" || t === "optgroup" || /^h[1-6]$/.test(t)) o["font-weight"] = "700";
+    if (/^h[1-6]$/.test(t)) o["font-size"] = ["2em", "1.5em", "1.17em", "1em", "0.83em", "0.67em"][+t.charAt(1) - 1];
+    if (t === "i" || t === "em" || t === "cite" || t === "var" || t === "dfn" || t === "address") o["font-style"] = "italic";
+    if ((t === "a" && el.hasAttribute("href")) || t === "u" || t === "ins") o["text-decoration-line"] = "underline";
+    if (t === "s" || t === "strike" || t === "del") o["text-decoration-line"] = "line-through";
+    if (t === "pre" || t === "code" || t === "kbd" || t === "samp" || t === "tt") o["font-family"] = "monospace";
+    if (t === "pre") o["white-space"] = "pre";
+    if (t === "a" && el.hasAttribute("href")) { o.color = "rgb(0, 0, 255)"; o.cursor = "pointer"; }
+    if (t === "th") o["text-align"] = "center";
+    if (t === "ul" || t === "ol" || t === "menu") o["list-style-type"] = t === "ol" ? "decimal" : "disc";
+    if (t === "li") o["list-style-type"] = "inherit";
+    // jsdom 31's default sheet (margin-block / margin-inline / padding-inline-start of the flow, heading and list rules)
+    var blockMargin = null;
+    if (/^h[1-6]$/.test(t)) blockMargin = ["0.67em", "0.83em", "1em", "1.33em", "1.67em", "2.33em"][+t.charAt(1) - 1];
+    else if (t === "blockquote" || t === "figure" || t === "listing" || t === "p" || t === "plaintext" || t === "pre" || t === "xmp") blockMargin = "1em";
+    else if (t === "dir" || t === "dl" || t === "menu" || t === "ol" || t === "ul") {
+      blockMargin = "1em";
+      for (var up = el.parentElement; up; up = up.parentElement) {
+        var ut = up.localName;
+        if (ut === "dir" || ut === "dl" || ut === "menu" || ut === "ol" || ut === "ul") { blockMargin = "0px"; break; }
+      }
+    }
+    if (blockMargin !== null) { o["margin-top"] = blockMargin; o["margin-bottom"] = blockMargin; }
+    if (t === "blockquote" || t === "figure") { o["margin-left"] = "40px"; o["margin-right"] = "40px"; }
+    if (t === "dd") o["margin-left"] = "40px";
+    if (t === "dir" || t === "menu" || t === "ol" || t === "ul") o["padding-left"] = "40px";
+    if (t === "td" || t === "th") { o["padding-top"] = "1px"; o["padding-right"] = "1px"; o["padding-bottom"] = "1px"; o["padding-left"] = "1px"; }
+    if (t === "big") o["font-size"] = "1.2em";
+    if (t === "small" || t === "sub" || t === "sup") o["font-size"] = "0.83333em";
+    if (t === "sub" || t === "sup") { o["vertical-align"] = t === "sub" ? "sub" : "super"; o["line-height"] = "normal"; }
+    if (t === "ruby" || t === "rt") o["unicode-bidi"] = "normal";
+    if (t === "li") o["text-align"] = "match-parent";
+    if (t === "button") { o["text-align"] = "center"; o["box-sizing"] = "border-box"; }
+    if (t === "select" || t === "table") o["box-sizing"] = "border-box";
+    if (t === "textarea") o["white-space"] = "pre-wrap";
+    if (t === "input") {
+      var it = (el.getAttribute("type") || "text").toLowerCase();
+      if (it !== "range" && it !== "checkbox" && it !== "radio") { o["overflow-x"] = "clip"; o["overflow-y"] = "clip"; }
+      if (it === "reset" || it === "button" || it === "submit") o["text-align"] = "center";
+      if (/^(radio|checkbox|reset|button|submit|color|search)$/.test(it)) o["box-sizing"] = "border-box";
+    }
+    var sides = ["top", "right", "bottom", "left"], k;
+    var border = function (width, style) { for (k = 0; k < 4; k++) { o["border-" + sides[k] + "-width"] = width; o["border-" + sides[k] + "-style"] = style; } };
+    if (t === "hr") {
+      o.color = "rgb(128, 128, 128)"; border("1px", "inset"); o["margin-top"] = "0.5em"; o["margin-bottom"] = "0.5em";
+      o["margin-left"] = "auto"; o["margin-right"] = "auto"; o["overflow-x"] = "hidden"; o["overflow-y"] = "hidden";
+    }
+    if (t === "fieldset") {
+      border("2px", "groove"); o["margin-left"] = "2px"; o["margin-right"] = "2px";
+      o["padding-top"] = "0.35em"; o["padding-bottom"] = "0.625em"; o["padding-left"] = "0.75em"; o["padding-right"] = "0.75em";
+    }
+    if (t === "legend") { o["padding-left"] = "2px"; o["padding-right"] = "2px"; }
+    if (t === "iframe") border("2px", "inset");
+    // unicode-bidi: the default sheet isolates blocks, lists, table parts, headings and anything with a dir attribute
+    if (o["unicode-bidi"] === undefined) {
+      o["unicode-bidi"] = t === "bdo" ? "isolate-override" : (BIDI.indexOf(t) >= 0 || /^h[1-6]$/.test(t) || el.hasAttribute("dir")) ? "isolate" : "normal";
+    }
+    return o;
+  };
+  var INHERITED = "color cursor direction font font-family font-size font-style font-variant font-weight letter-spacing line-height list-style list-style-image list-style-position list-style-type pointer-events quotes text-align text-indent text-transform text-shadow visibility white-space word-spacing word-break overflow-wrap tab-size caret-color fill fill-opacity fill-rule stroke stroke-width stroke-opacity stroke-linecap stroke-linejoin stroke-dasharray stroke-dashoffset stroke-miterlimit".split(" ");
+  var INITIAL = {
+    "color": "rgb(0, 0, 0)", "background-color": "rgba(0, 0, 0, 0)", "background-image": "none", "visibility": "visible", "opacity": "1", "position": "static",
+    "overflow-x": "visible", "overflow-y": "visible", "pointer-events": "auto", "z-index": "auto", "float": "none", "clear": "none", "cursor": "auto",
+    "font-size": "16px", "font-weight": "400", "font-style": "normal", "font-family": "Times New Roman", "line-height": "normal", "letter-spacing": "normal",
+    "text-align": "start", "text-decoration-line": "none", "text-transform": "none", "text-indent": "0px", "white-space": "normal", "word-spacing": "0px",
+    "width": "auto", "height": "auto", "min-width": "auto", "min-height": "auto", "max-width": "none", "max-height": "none",
+    "top": "auto", "right": "auto", "bottom": "auto", "left": "auto", "box-sizing": "content-box", "unicode-bidi": "normal", "direction": "ltr", "vertical-align": "baseline",
+    "margin-top": "0px", "margin-right": "0px", "margin-bottom": "0px", "margin-left": "0px", "padding-top": "0px", "padding-right": "0px", "padding-bottom": "0px", "padding-left": "0px",
+    "border-top-width": "0px", "border-right-width": "0px", "border-bottom-width": "0px", "border-left-width": "0px",
+    "border-top-style": "none", "border-right-style": "none", "border-bottom-style": "none", "border-left-style": "none",
+    "fill": "rgb(0, 0, 0)", "fill-opacity": "1", "fill-rule": "nonzero", "stroke": "none", "stroke-width": "1px", "stroke-opacity": "1", "stroke-linecap": "butt", "stroke-linejoin": "miter",
+    "list-style-type": "disc", "flex-direction": "row", "flex-wrap": "nowrap", "justify-content": "normal", "align-items": "normal", "transform": "none", "content": "normal",
+  };
+
+  // ---- colours: a browser answers rgb() / rgba() whatever way the colour was written
+  var NAMED = ("aliceblue:f0f8ff antiquewhite:faebd7 aqua:00ffff aquamarine:7fffd4 azure:f0ffff beige:f5f5dc bisque:ffe4c4 black:000000 blanchedalmond:ffebcd blue:0000ff blueviolet:8a2be2 brown:a52a2a burlywood:deb887 " +
+    "cadetblue:5f9ea0 chartreuse:7fff00 chocolate:d2691e coral:ff7f50 cornflowerblue:6495ed cornsilk:fff8dc crimson:dc143c cyan:00ffff darkblue:00008b darkcyan:008b8b darkgoldenrod:b8860b darkgray:a9a9a9 darkgreen:006400 " +
+    "darkgrey:a9a9a9 darkkhaki:bdb76b darkmagenta:8b008b darkolivegreen:556b2f darkorange:ff8c00 darkorchid:9932cc darkred:8b0000 darksalmon:e9967a darkseagreen:8fbc8f darkslateblue:483d8b darkslategray:2f4f4f " +
+    "darkslategrey:2f4f4f darkturquoise:00ced1 darkviolet:9400d3 deeppink:ff1493 deepskyblue:00bfff dimgray:696969 dimgrey:696969 dodgerblue:1e90ff firebrick:b22222 floralwhite:fffaf0 forestgreen:228b22 fuchsia:ff00ff " +
+    "gainsboro:dcdcdc ghostwhite:f8f8ff gold:ffd700 goldenrod:daa520 gray:808080 green:008000 greenyellow:adff2f grey:808080 honeydew:f0fff0 hotpink:ff69b4 indianred:cd5c5c indigo:4b0082 ivory:fffff0 khaki:f0e68c " +
+    "lavender:e6e6fa lavenderblush:fff0f5 lawngreen:7cfc00 lemonchiffon:fffacd lightblue:add8e6 lightcoral:f08080 lightcyan:e0ffff lightgoldenrodyellow:fafad2 lightgray:d3d3d3 lightgreen:90ee90 lightgrey:d3d3d3 " +
+    "lightpink:ffb6c1 lightsalmon:ffa07a lightseagreen:20b2aa lightskyblue:87cefa lightslategray:778899 lightslategrey:778899 lightsteelblue:b0c4de lightyellow:ffffe0 lime:00ff00 limegreen:32cd32 linen:faf0e6 " +
+    "magenta:ff00ff maroon:800000 mediumaquamarine:66cdaa mediumblue:0000cd mediumorchid:ba55d3 mediumpurple:9370db mediumseagreen:3cb371 mediumslateblue:7b68ee mediumspringgreen:00fa9a mediumturquoise:48d1cc " +
+    "mediumvioletred:c71585 midnightblue:191970 mintcream:f5fffa mistyrose:ffe4e1 moccasin:ffe4b5 navajowhite:ffdead navy:000080 oldlace:fdf5e6 olive:808000 olivedrab:6b8e23 orange:ffa500 orangered:ff4500 " +
+    "orchid:da70d6 palegoldenrod:eee8aa palegreen:98fb98 paleturquoise:afeeee palevioletred:db7093 papayawhip:ffefd5 peachpuff:ffdab9 peru:cd853f pink:ffc0cb plum:dda0dd powderblue:b0e0e6 purple:800080 " +
+    "rebeccapurple:663399 red:ff0000 rosybrown:bc8f8f royalblue:4169e1 saddlebrown:8b4513 salmon:fa8072 sandybrown:f4a460 seagreen:2e8b57 seashell:fff5ee sienna:a0522d silver:c0c0c0 skyblue:87ceeb slateblue:6a5acd " +
+    "slategray:708090 slategrey:708090 snow:fffafa springgreen:00ff7f steelblue:4682b4 tan:d2b48c teal:008080 thistle:d8bfd8 tomato:ff6347 turquoise:40e0d0 violet:ee82ee wheat:f5deb3 white:ffffff whitesmoke:f5f5f5 " +
+    "yellow:ffff00 yellowgreen:9acd32").split(" ").reduce(function (m, e) { var p = e.split(":"); m[p[0]] = p[1]; return m; }, {});
+  var rgba = function (r, g2, b, a) {
+    var c = function (x) { return Math.max(0, Math.min(255, Math.round(x))); };
+    a = Math.max(0, Math.min(1, a));
+    return a === 1 ? "rgb(" + c(r) + ", " + c(g2) + ", " + c(b) + ")" : "rgba(" + c(r) + ", " + c(g2) + ", " + c(b) + ", " + +a.toFixed(3) + ")";
+  };
+  var hslToRgb = function (h, sat, l) {
+    h = ((h % 360) + 360) % 360 / 360;
+    var q = l < 0.5 ? l * (1 + sat) : l + sat - l * sat, p = 2 * l - q;
+    var f = function (t) { t = (t + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 0.5 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+    return [f(h + 1 / 3) * 255, f(h) * 255, f(h - 1 / 3) * 255];
+  };
+  var normColor = function (v) {
+    var low = v.trim().toLowerCase(), m;
+    if (low === "transparent") return "rgba(0, 0, 0, 0)";
+    if (NAMED[low]) low = "#" + NAMED[low];
+    if ((m = /^#([0-9a-f]{3,8})$/.exec(low))) {
+      var h = m[1];
+      if (h.length === 3 || h.length === 4) h = h.split("").map(function (x) { return x + x; }).join("");
+      if (h.length === 6 || h.length === 8) return rgba(parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1);
+      return v;
+    }
+    if ((m = /^rgba?\(\s*([\d.]+)(%?)[\s,]+([\d.]+)(%?)[\s,]+([\d.]+)(%?)(?:[\s,/]+([\d.]+)(%?))?\s*\)$/.exec(low))) {
+      var ch = function (x, pct) { return pct ? parseFloat(x) * 2.55 : parseFloat(x); };
+      return rgba(ch(m[1], m[2]), ch(m[3], m[4]), ch(m[5], m[6]), m[7] === undefined ? 1 : m[8] ? parseFloat(m[7]) / 100 : parseFloat(m[7]));
+    }
+    if ((m = /^hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%(?:[\s,/]+([\d.]+)(%?))?\s*\)$/.exec(low))) {
+      var rgb = hslToRgb(parseFloat(m[1]), parseFloat(m[2]) / 100, parseFloat(m[3]) / 100);
+      return rgba(rgb[0], rgb[1], rgb[2], m[4] === undefined ? 1 : m[5] ? parseFloat(m[4]) / 100 : parseFloat(m[4]));
+    }
+    return v;
+  };
+
+  // ---- the cascade for one element
+  // what was computed since the document last changed
+  var memo = { v: -1, m: new WeakMap() };
+  var computedOf = function (el, depth) {
+    // adopted sheet edits (replaceSync and friends) are not DOM mutations, so their revisions are part of the version
+    var version = D.version() + "|" + (g.__styleEpoch || 0) + "|" + (el.ownerDocument ? adoptedSignature(el.ownerDocument) : "");
+    if (memo.v !== version) memo = { v: version, m: new WeakMap() };
+    var known = memo.m.get(el);
+    if (known) return known;
+    var made = cascade(el, depth);
+    memo.m.set(el, made);
+    return made;
+  };
+  // a picker keeps, per property, the declaration that wins: importance, then style attribute, then specificity, then order
+  var picker = function () {
+    var best = {}; // property -> { v, imp, inline, w, o }
+    return {
+      best: best,
+      offer: function (prop, value, imp, inline, w, o) {
+        var b = best[prop];
+        if (b) {
+          if (b.imp !== imp) { if (!imp) return; }
+          else if (b.inline !== inline) { if (!inline) return; }
+          else if (b.w > w || (b.w === w && b.o > o)) return;
+        }
+        best[prop] = { v: value, imp: imp, inline: inline, w: w, o: o };
+      },
+    };
+  };
+  // var(--name, fallback) replaced by the values of the custom properties; null when a variable has no value
+  var substVars = function (s, vars, stack) {
+    for (var guard = 0; guard < 50; guard++) {
+      var at = s.indexOf("var(");
+      if (at < 0) return s;
+      var depth = 0, close = -1;
+      for (var i = at + 3; i < s.length; i++) {
+        var c = s.charAt(i);
+        if (c === "(") depth++;
+        else if (c === ")" && --depth === 0) { close = i; break; }
+      }
+      if (close < 0) return null;
+      var inner = s.slice(at + 4, close), comma = findTop(inner, 0, ","), name = inner.slice(0, comma).trim();
+      var value = vars[name];
+      if (value !== undefined && stack.indexOf(name) < 0) value = substVars(value, vars, stack.concat(name));
+      else value = null;
+      if (value === null) value = comma < inner.length ? substVars(inner.slice(comma + 1).trim(), vars, stack) : null;
+      if (value === null) return null;
+      s = s.slice(0, at) + value + s.slice(close + 1);
+    }
+    return null;
+  };
+
+  // ---- lengths: a computed length is in px; calc(), min(), max() and clamp() are evaluated when they can be
+  var unitPx = function (n, u, fs, root) {
+    switch (u.toLowerCase()) {
+      case "px": return n;
+      case "em": return n * fs;
+      case "rem": return n * root;
+      case "ch": case "ex": return n * fs * 0.5;
+      case "pt": return n * 4 / 3;
+      case "pc": return n * 16;
+      case "in": return n * 96;
+      case "cm": return n * 96 / 2.54;
+      case "mm": return n * 96 / 25.4;
+      case "q": return n * 96 / 101.6;
+      case "vw": return n * (g.innerWidth || 1024) / 100;
+      case "vh": return n * (g.innerHeight || 768) / 100;
+      case "vmin": return n * Math.min(g.innerWidth || 1024, g.innerHeight || 768) / 100;
+      case "vmax": return n * Math.max(g.innerWidth || 1024, g.innerHeight || 768) / 100;
+    }
+    return null;
+  };
+  var fmtPx = function (x) { x = +x.toFixed(4); return (x === 0 ? 0 : x) + "px"; };
+  // a math expression -> { v, px } or null (a percentage, an unknown unit or anything unparsed leaves the text as it was)
+  var evalMath = function (s, fs, root) {
+    var i = 0, bad = {};
+    var ws = function () { while (i < s.length && /\s/.test(s.charAt(i))) i++; };
+    var sum, primary;
+    var args = function () {
+      var out = [];
+      for (;;) {
+        out.push(sum()); ws();
+        if (s.charAt(i) === ",") { i++; continue; }
+        if (s.charAt(i) === ")") { i++; return out; }
+        throw bad;
+      }
+    };
+    var same = function (a, b) { if (a.px !== b.px) throw bad; };
+    primary = function () {
+      ws();
+      var rest = s.slice(i), m = /^(calc|min|max|clamp)\(/i.exec(rest);
+      if (m) {
+        i += m[0].length;
+        var list = args(), f = m[1].toLowerCase();
+        if (f === "calc") { if (list.length !== 1) throw bad; return list[0]; }
+        list.forEach(function (e) { same(e, list[0]); });
+        if (f === "min") return { v: Math.min.apply(null, list.map(function (e) { return e.v; })), px: list[0].px };
+        if (f === "max") return { v: Math.max.apply(null, list.map(function (e) { return e.v; })), px: list[0].px };
+        if (list.length !== 3) throw bad;
+        return { v: Math.max(list[0].v, Math.min(list[1].v, list[2].v)), px: list[0].px };
+      }
+      if (s.charAt(i) === "(") {
+        i++;
+        var v = sum(); ws();
+        if (s.charAt(i) !== ")") throw bad;
+        i++;
+        return v;
+      }
+      m = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?(%|[a-z]+)?/i.exec(rest);
+      if (!m) throw bad;
+      i += m[0].length;
+      var n = parseFloat(m[0]), u = m[3];
+      if (!u) return { v: n, px: false };
+      var px = u === "%" ? null : unitPx(n, u, fs, root);
+      if (px === null) throw bad;
+      return { v: px, px: true };
+    };
+    var term = function () {
+      var a = primary();
+      for (;;) {
+        ws();
+        var c = s.charAt(i);
+        if (c === "*") { i++; var b = primary(); if (a.px && b.px) throw bad; a = { v: a.v * b.v, px: a.px || b.px }; }
+        else if (c === "/") { i++; var d = primary(); if (d.px || d.v === 0) throw bad; a = { v: a.v / d.v, px: a.px }; }
+        else return a;
+      }
+    };
+    sum = function () {
+      var a = term();
+      for (;;) {
+        ws();
+        var c = s.charAt(i);
+        if (c === "+" || c === "-") { i++; var b = term(); same(a, b); a = { v: c === "+" ? a.v + b.v : a.v - b.v, px: a.px }; }
+        else return a;
+      }
+    };
+    try {
+      var r = sum(); ws();
+      return i === s.length ? r : null;
+    } catch (e) {
+      if (e === bad) return null;
+      throw e;
+    }
+  };
+  var lengthsIn = function (v, fs, root) {
+    if (!/\d/.test(v) || /["'(]\s*url\(|url\(|["']/.test(v)) return v;
+    var out = "", i = 0, m;
+    // math functions first (they may nest: only the outermost is evaluated)
+    while (i < v.length) {
+      var rest = v.slice(i);
+      m = /(^|[^\w-])(calc|min|max|clamp)\(/i.exec(rest);
+      if (!m) { out += rest; break; }
+      var start = i + m.index + m[1].length;
+      out += v.slice(i, start);
+      var depth = 0, end = -1;
+      for (var j = start; j < v.length; j++) {
+        var c = v.charAt(j);
+        if (c === "(") depth++;
+        else if (c === ")" && --depth === 0) { end = j; break; }
+      }
+      if (end < 0) { out += v.slice(start); break; }
+      var text = v.slice(start, end + 1), r = evalMath(text, fs, root);
+      out += r === null ? text : r.px ? fmtPx(r.v) : String(+r.v.toFixed(3));
+      i = end + 1;
+    }
+    return out.replace(/(^|[\s,(\/])(-?(?:\d+\.?\d*|\.\d+))(px|em|rem|pt|pc|in|cm|mm|q|vw|vh|vmin|vmax|ch|ex)(?![\w-])/gi, function (all, pre, n, u) {
+      var px = unitPx(parseFloat(n), u, fs, root);
+      return px === null ? all : pre + fmtPx(px);
+    });
+  };
+  var FONT_KEYWORDS = { "xx-small": 9, "x-small": 10, "small": 13, "medium": 16, "large": 18, "x-large": 24, "xx-large": 32, "xxx-large": 48 };
+  var fontSizePx = function (v, parentPx, root) {
+    var low = v.trim().toLowerCase(), m;
+    if (FONT_KEYWORDS[low] !== undefined) return FONT_KEYWORDS[low];
+    if (low === "smaller") return parentPx / 1.2;
+    if (low === "larger") return parentPx * 1.2;
+    if ((m = /^(-?[\d.]+)%$/.exec(low))) return parentPx * parseFloat(m[1]) / 100;
+    var s = lengthsIn(low, parentPx, root);
+    if ((m = /^(-?[\d.]+)px$/.exec(s))) return parseFloat(m[1]);
+    return null;
+  };
+
+  // the pseudo-elements getComputedStyle(el, "::before") can answer for: the rules whose selector ends in one are matched against the
+  // element in front of it, and the pseudo-element inherits from that element
+  var PSEUDO_RE = /::?(before|after|first-line|first-letter|marker|placeholder|selection)\s*$/i;
+  var pseudoName = function (arg) {
+    var m = /^::?([a-z-]+)$/i.exec(String(arg).trim());
+    var n = m ? m[1].toLowerCase() : "";
+    return /^(before|after|first-line|first-letter|marker|placeholder|selection)$/.test(n) ? n : "";
+  };
+  var sharedChildren = new WeakMap(), ROOT_STYLE = {};
+  var cascade = function (el, depth, pseudo) {
+    var doc = el.ownerDocument, ua = pseudo ? { display: "inline" } : uaStyle(el), order = 0;
+    var cands = []; // [prop, value, imp, inline, w, o, hasVar]
+    var rules = doc ? documentRules(doc) : [];
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.media.length && !mediaOk(r.media)) continue;
+      var hit, sel = r.selector;
+      if (pseudo) {
+        var pm = PSEUDO_RE.exec(sel);
+        if (!pm || pm[1].toLowerCase() !== pseudo) continue;
+        sel = sel.slice(0, pm.index).trim() || "*";
+      }
+      try { hit = el.matches(sel); } catch (e) { hit = false; }
+      if (!hit) continue;
+      for (var j = 0; j < r.decls.length; j++) cands.push([r.decls[j][0], r.decls[j][1], r.decls[j][2], false, r.weight, r.order, r.decls[j][3]]);
+    }
+    var inline = pseudo ? null : el.getAttribute("style");
+    var parent = pseudo ? el : el.parentElement, parentStyle = parent && depth < 200 ? computedOf(parent, depth + 1) : null;
+    // No rule applies: the style follows from the parent's style, the defaults and the style attribute alone. Such
+    // elements share one object, and it outlives a change to the document as long as what it follows from is unchanged:
+    // without style sheets nearly every element is like this, and a read after any change would recompute the whole
+    // chain of ancestors otherwise.
+    var shareKey = null, shareMap = null;
+    if (!pseudo && !cands.length) {
+      var shareParent = parentStyle || ROOT_STYLE;
+      // the viewport too when the declarations can depend on it: this outlives the document's version, not a resize
+      shareKey = JSON.stringify(ua) + "|" + (inline || "") + "|" + (!parent && doc && doc.documentElement === el) + "|" + (inline && inline.indexOf("v") >= 0 ? g.innerWidth + "x" + g.innerHeight : "");
+      shareMap = sharedChildren.get(shareParent);
+      if (!shareMap) sharedChildren.set(shareParent, (shareMap = {}));
+      if (shareMap[shareKey]) return shareMap[shareKey];
+    }
+    if (inline) parseDeclarations(inline).forEach(function (d) { cands.push([d[0], d[1], d[2], true, 0, ++order, d[3]]); });
+    var out = {}, k;
+    // custom properties inherit, and a declaration may use any of them
+    var vars = {}, custom = picker(), plain = picker();
+    if (parentStyle) for (k in parentStyle) if (k.slice(0, 2) === "--") vars[k] = parentStyle[k];
+    cands.forEach(function (c) { if (c[0].slice(0, 2) === "--") custom.offer(c[0], c[1], c[2], c[3], c[4], c[5]); });
+    for (k in custom.best) {
+      var cv = custom.best[k].v;
+      if (cv.toLowerCase() === "inherit" || cv.toLowerCase() === "unset") { if (parentStyle && parentStyle[k] !== undefined) vars[k] = parentStyle[k]; else delete vars[k]; }
+      else if (cv.toLowerCase() === "initial") delete vars[k];
+      else vars[k] = cv;
+    }
+    cands.forEach(function (c) {
+      if (c[0].slice(0, 2) === "--") return;
+      if (!c[6]) { plain.offer(c[0], c[1], c[2], c[3], c[4], c[5]); return; }
+      var value = substVars(c[1], vars, []);
+      if (value === null) return; // invalid at computed-value time
+      expand(c[0], value).forEach(function (e) { plain.offer(e[0], e[1], c[2], c[3], c[4], c[5]); });
+    });
+    var best = plain.best;
+    for (k in INITIAL) out[k] = INITIAL[k];
+    if (parentStyle) INHERITED.forEach(function (p) { if (parentStyle[p] !== undefined) out[p] = parentStyle[p]; });
+    for (k in ua) out[k] = ua[k] === "inherit" && parentStyle ? parentStyle[k] : ua[k];
+    for (k in vars) out[k] = vars[k];
+    for (k in best) {
+      var v = best[k].v, low = v.toLowerCase();
+      if (low === "inherit") out[k] = parentStyle && parentStyle[k] !== undefined ? parentStyle[k] : INITIAL[k] || "";
+      else if (low === "initial") out[k] = INITIAL[k] || "";
+      else if (low === "unset") out[k] = INHERITED.indexOf(k) >= 0 && parentStyle && parentStyle[k] !== undefined ? parentStyle[k] : INITIAL[k] || "";
+      else if (low === "currentcolor" && (k === "border-top-color" || k === "border-right-color" || k === "border-bottom-color" || k === "border-left-color" || k === "background-color")) out[k] = out.color;
+      else out[k] = v;
+    }
+    ["top", "right", "bottom", "left"].forEach(function (s) { if (out["border-" + s + "-color"] === undefined || out["border-" + s + "-color"] === "currentcolor") out["border-" + s + "-color"] = out.color; });
+    // the lengths of the borders that have no style are 0
+    ["top", "right", "bottom", "left"].forEach(function (s) { var st = out["border-" + s + "-style"]; if (st === "none" || st === "hidden") out["border-" + s + "-width"] = "0px"; });
+    // lengths in px: em against this element's font size (the parent's for font-size itself), rem against the root's
+    var parentPx = parentStyle ? parseFloat(parentStyle["font-size"]) || 16 : 16;
+    var ownPx = fontSizePx(out["font-size"], parentPx, 16);
+    if (ownPx === null) ownPx = parentPx; else out["font-size"] = fmtPx(ownPx);
+    var rootPx = ownPx;
+    if (parent && doc && doc.documentElement && doc.documentElement !== el) rootPx = parseFloat(computedOf(doc.documentElement, depth + 1)["font-size"]) || 16;
+    for (k in out) if (k !== "font-size" && k.slice(0, 2) !== "--" && k !== "font-family") out[k] = lengthsIn(out[k], ownPx, rootPx);
+    if (out["font-family"] && D.normalizeFamily) out["font-family"] = D.normalizeFamily(String(out["font-family"]).trim());
+    for (k in out) if (k === "color" || k === "fill" || k === "stroke" || k.slice(-6) === "-color") { if (out[k] !== "currentcolor") out[k] = normColor(out[k]); }
+    if (pseudo && (pseudo === "before" || pseudo === "after") && (out.content === undefined || out.content === "normal" || out.content === "")) out.content = "none";
+    if (out["overflow-x"] === undefined) out["overflow-x"] = "visible";
+    out.overflow = out["overflow-x"] === out["overflow-y"] ? out["overflow-x"] : out["overflow-x"] + " " + out["overflow-y"];
+    // the display of a floated or absolutely positioned box is block-level
+    if ((out.float !== "none" || out.position === "absolute" || out.position === "fixed") && out.display === "inline") out.display = "block";
+    if (shareKey) shareMap[shareKey] = out;
+    return out;
+  };
+
+  var kebab = function (k) { return k.replace(/[A-Z]/g, function (c) { return "-" + c.toLowerCase(); }); };
+  var camel = function (k) { return k.replace(/-([a-z])/g, function (_, c) { return c.toUpperCase(); }); };
+  var SHORT = { margin: "margin-", padding: "padding-" };
+
+  // the element styles' own class (nativedom.js), so el.style and a computed style are instances
+  // of the one CSSStyleDeclaration; the fallback is for a layer running without nativedom.js
+  var Computed = D.CSSStyleDeclarationCtor || function CSSStyleDeclaration() {};
+  // The used style of the renderer (layout_json's "s") over the JS cascade's values: keywords as litehtml resolved them
+  // (display of a floated box, an inherited color, a font-size in px) and the box metrics the cascade cannot know.
+  var overlayLive = function (values, s) {
+    var out = {}, k;
+    for (k in values) out[k] = values[k];
+    var px = function (n) { return fmtPx(n); };
+    out.display = s.display; out.position = s.position; out["float"] = s["float"]; out.visibility = s.visibility;
+    out["overflow-x"] = s.overflowX; out["overflow-y"] = s.overflowY;
+    out.overflow = s.overflowX === s.overflowY ? s.overflowX : s.overflowX + " " + s.overflowY;
+    out["text-align"] = s.textAlign; out.color = s.color; out["font-size"] = px(s.fontSize); out.opacity = String(s.opacity);
+    ["Top", "Right", "Bottom", "Left"].forEach(function (side) {
+      var l = side.toLowerCase();
+      out["margin-" + l] = px(s["margin" + side]);
+      out["padding-" + l] = px(s["padding" + side]);
+      out["border-" + l + "-width"] = px(s["border" + side]);
+    });
+    return out;
+  };
+  var makeComputed = function (el, pseudo) {
+    var getValues = function () {
+      if (pseudo) {
+        var pn = pseudoName(pseudo);
+        return pn ? cascade(el, 0, pn) : {};
+      }
+      var values = computedOf(el, 0);
+      // live layout: the renderer's used values replace the cascade's guesses for what it computed (see overlayLive)
+      var live = g.__edgeLiveStyle ? g.__edgeLiveStyle(el) : null;
+      return live ? overlayLive(values, live) : values;
+    };
+    var read = function (name) {
+      var values = getValues();
+      if (name.slice(0, 2) !== "--") name = name.toLowerCase(); // custom properties are case-sensitive
+      var v = values[name];
+      if (v === undefined && SHORT[name]) {
+        var f = SIDES.map(function (s) { return values[SHORT[name] + s]; });
+        if (f.every(function (x) { return x !== undefined; })) v = f[0] === f[2] && f[1] === f[3] ? (f[0] === f[1] ? f[0] : f[0] + " " + f[1]) : f.join(" ");
+      }
+      return v === undefined ? "" : v;
+    };
+    var getNames = function () {
+      var values = getValues();
+      return Object.keys(values).filter(function (n) { return n.slice(0, 2) !== "--"; }).sort();
+    };
+    var base = {};
+    Object.defineProperties(base, {
+      getPropertyValue: { value: function (n) { return read(String(n)); }, configurable: true },
+      getPropertyPriority: { value: function () { return ""; }, configurable: true },
+      item: { value: function (i) { return getNames()[i] || ""; }, configurable: true },
+      setProperty: { value: function () { throw domErr("NoModificationAllowedError", "These styles are computed, and therefore read-only."); }, configurable: true },
+      removeProperty: { value: function () { throw domErr("NoModificationAllowedError", "These styles are computed, and therefore read-only."); }, configurable: true },
+      length: { get: function () { return getNames().length; }, configurable: true },
+      cssText: { get: function () { return ""; }, configurable: true },
+      parentRule: { value: null, configurable: true },
+    });
+    Object.setPrototypeOf(base, Computed.prototype);
+    return new Proxy(base, {
+      get: function (t, k) {
+        if (typeof k !== "string") return t[k];
+        if (k in t) return t[k];
+        if (/^\d+$/.test(k)) return getNames()[+k];
+        if (k === "cssFloat") return read("float");
+        var n = k.indexOf("-") >= 0 ? k : kebab(k);
+        return read(n);
+      },
+      set: function (t, k) {
+        throw domErr("NoModificationAllowedError", "These styles are computed, and therefore read-only.");
+      },
+      has: function (t, k) { return typeof k === "string" ? (k in t || read(kebab(k)) !== "" || /^\d+$/.test(k) && +k < getNames().length) : k in t; },
+      ownKeys: function () { var names = getNames(); return names.map(function (_, i) { return String(i); }).concat(names.map(camel)); },
+      getOwnPropertyDescriptor: function (t, k) {
+        if (typeof k !== "string") return undefined;
+        var names = getNames();
+        if (/^\d+$/.test(k)) return +k < names.length ? { value: names[+k], enumerable: true, configurable: true } : undefined;
+        var v = read(kebab(k));
+        return v === "" ? undefined : { value: v, enumerable: true, configurable: true };
+      },
+    });
+  };
+  var domErr = function (name, message) { var e = new Error(message); e.name = name; return e; };
+
+  var computedCache = new WeakMap();
+  g.getComputedStyle = function getComputedStyle(el, pseudo) {
+    if (!el || el.nodeType !== 1) throw new TypeError("Failed to execute 'getComputedStyle' on 'Window': parameter 1 is not of type 'Element'.");
+    if (pseudo) return makeComputed(el, pseudo);
+    var cs = computedCache.get(el);
+    if (!cs) {
+      cs = makeComputed(el, false);
+      computedCache.set(el, cs);
+    }
+    return cs;
+  };
+  // (CSSStyleDeclaration is not put on D.window: boot.js installs the constructor as a global from
+  // D.CSSStyleDeclarationCtor, keeping style objects off the bridge's class table — see nativedom.js)
+
+  // ---- document.styleSheets: the <style> elements, with their rules
+  var CSSStyleRule = function CSSStyleRule() {};
+  // The sheet interfaces. They are globals but stay off the bridge's window table, like DOMStringMap:
+  // their objects are all named/indexed properties, which the bridge's dynamic wrappers forward correctly.
+  var StyleSheet = function StyleSheet() { throw new TypeError("Illegal constructor"); };
+  var StyleSheetList = function StyleSheetList() { throw new TypeError("Illegal constructor"); };
+  StyleSheetList.prototype.item = function (i) { return i >= 0 && i < this.length ? this[i] : null; };
+  StyleSheetList.prototype[Symbol.iterator] = Array.prototype[Symbol.iterator];
+  var MediaList = function MediaList() { throw new TypeError("Illegal constructor"); };
+  var mediaQueries = function (text) { return String(text || "").split(",").map(function (q) { return q.trim(); }).filter(Boolean); };
+  var makeMediaList = function (text) {
+    var ml = Object.create(MediaList.prototype);
+    Object.defineProperty(ml, "_q", { value: mediaQueries(text), writable: true, configurable: true });
+    return syncMedia(ml);
+  };
+  var syncMedia = function (ml) {
+    for (var i = 0; i < ml._q.length; i++) (function (i) { Object.defineProperty(ml, i, { configurable: true, enumerable: true, get: function () { return ml._q[i]; } }); })(i);
+    return ml;
+  };
+  Object.defineProperties(MediaList.prototype, {
+    mediaText: { configurable: true, get: function () { return this._q.join(", "); }, set: function (v) { this._q = mediaQueries(v); syncMedia(this); } },
+    length: { configurable: true, get: function () { return this._q.length; } },
+  });
+  MediaList.prototype.item = function (i) { return i >= 0 && i < this._q.length ? this._q[i] : null; };
+  MediaList.prototype.appendMedium = function (m) { m = String(m).trim(); if (m && this._q.indexOf(m) < 0) { this._q.push(m); syncMedia(this); } };
+  MediaList.prototype.deleteMedium = function (m) { var i = this._q.indexOf(String(m).trim()); if (i >= 0) this._q.splice(i, 1); };
+  MediaList.prototype.toString = function () { return this.mediaText; };
+  if (!g.StyleSheet) g.StyleSheet = StyleSheet;
+  if (!g.StyleSheetList) g.StyleSheetList = StyleSheetList;
+  if (!g.MediaList) g.MediaList = MediaList;
+  var sheetsOf = function (doc) {
+    var out = [], styles = doc.querySelectorAll("style");
+    for (var i = 0; i < styles.length; i++) {
+      (function (owner) {
+        // one sheet object per element, kept: styleSheets and el.sheet must answer the same object,
+        // and its closures read the element's text live, so keeping it does not stale the rules
+        if (owner.__sheet) { out.push(owner.__sheet); return; }
+        // the rules of the sheet as text, and as objects, are kept for as long as the text is what was last seen: a page
+        // that inserts thousands of rules (CSS-in-JS) must not parse the whole sheet each time
+        var listOf = function () {
+          var t = owner.textContent;
+          if (owner.__rt !== t) { owner.__rl = splitRules(stripComments(t)); owner.__rt = t; owner.__fr = null; }
+          return owner.__rl;
+        };
+        var store = function (list, fr) { var t = list.join("\n"); owner.textContent = t; owner.__rt = t; owner.__rl = list; owner.__fr = fr || null; };
+        var cssRules = function () {
+          listOf();
+          // the sheet stamp is applied when the list is built (and to a rule insertRule adds),
+          // not on every read: CSS-in-JS pages read cssRules in loops over thousands of rules
+          var fr = owner.__fr;
+          if (!fr) { fr = owner.__fr = parseSheetFlat(owner.__rt); stampSheet(fr, obj); }
+          return fr;
+        };
+        var obj = {
+          type: "text/css", href: null, ownerNode: owner, parentStyleSheet: null, title: owner.getAttribute("title"), media: makeMediaList(owner.getAttribute("media") || ""),
+          get disabled() { return owner.hasAttribute("disabled"); },
+          set disabled(v) { if (v) owner.setAttribute("disabled", ""); else owner.removeAttribute("disabled"); },
+          get cssRules() { return cssRules(); },
+          get rules() { return cssRules(); },
+          insertRule: function (rule, index) {
+            var list = listOf().slice();
+            index = index === undefined ? 0 : index;
+            if (index < 0 || index > list.length) throw domErr("IndexSizeError", "Failed to execute 'insertRule' on 'CSSStyleSheet': the index " + index + " is greater than the length of the rule list.");
+            var fr = (cssRules(), owner.__fr);
+            list.splice(index, 0, String(rule));
+            var added = parseSheetFlat(String(rule))[0];
+            stampSheet([added], obj);
+            fr.splice(index, 0, added); // the rule list is live
+            store(list, fr);
+            return index;
+          },
+          deleteRule: function (index) {
+            var list = listOf().slice();
+            if (index < 0 || index >= list.length) throw domErr("IndexSizeError", "Failed to execute 'deleteRule' on 'CSSStyleSheet': the index " + index + " is greater than the length of the rule list.");
+            var fr = (cssRules(), owner.__fr);
+            list.splice(index, 1);
+            fr.splice(index, 1);
+            store(list, fr);
+          },
+        };
+        if (g.CSSStyleSheet) Object.setPrototypeOf(obj, g.CSSStyleSheet.prototype);
+        owner.__sheet = obj;
+        out.push(obj);
+      })(styles[i]);
+    }
+    var list = Object.create(StyleSheetList.prototype);
+    out.forEach(function (s, i) { list[i] = s; });
+    list.length = out.length;
+    return list;
+  };
+  // the top-level rules of a sheet as text (an at-rule with its block is one)
+  var splitRules = function (s) {
+    var out = [], i = 0;
+    while (i < s.length) {
+      while (i < s.length && /\s/.test(s.charAt(i))) i++;
+      if (i >= s.length) break;
+      var stop = findTop(s, i, ";{");
+      if (s.charAt(stop) === ";") { out.push(s.slice(i, stop + 1).trim()); i = stop + 1; continue; }
+      var end = matchingBrace(s, stop);
+      out.push(s.slice(i, end + 1).trim());
+      i = end + 1;
+    }
+    return out;
+  };
+  // ---- the CSS rule classes, over the flat parser. The cascade never uses these objects (it
+  // reads the sheet text itself); they are the API surface a page sees through cssRules.
+  var CSSRule = function CSSRule() { throw new TypeError("Illegal constructor"); };
+  [["STYLE_RULE", 1], ["CHARSET_RULE", 2], ["IMPORT_RULE", 3], ["MEDIA_RULE", 4], ["FONT_FACE_RULE", 5], ["PAGE_RULE", 6], ["KEYFRAMES_RULE", 7], ["KEYFRAME_RULE", 8], ["MARGIN_RULE", 9], ["NAMESPACE_RULE", 10], ["COUNTER_STYLE_RULE", 11], ["SUPPORTS_RULE", 12], ["FONT_FEATURE_VALUES_RULE", 14]].forEach(function (p) {
+    CSSRule[p[0]] = p[1];
+    Object.defineProperty(CSSRule.prototype, p[0], { value: p[1] });
+  });
+  Object.defineProperties(CSSRule.prototype, {
+    type: { value: 0, writable: true, configurable: true },
+    cssText: { value: "", writable: true, configurable: true },
+    parentRule: { value: null, writable: true, configurable: true },
+    parentStyleSheet: { value: null, writable: true, configurable: true },
+  });
+  g.CSSRule = CSSRule;
+  var ruleClass = function (name, parent) {
+    var C = { [name]: function () { throw new TypeError("Illegal constructor"); } }[name];
+    C.prototype = Object.create((parent || CSSRule).prototype, { constructor: { value: C, writable: true, configurable: true } });
+    Object.setPrototypeOf(C, parent || CSSRule);
+    g[name] = C;
+    return C;
+  };
+  // a rule list is an array wearing the interface's prototype (the chain keeps the array methods)
+  var CSSRuleList = function CSSRuleList() { throw new TypeError("Illegal constructor"); };
+  Object.setPrototypeOf(CSSRuleList.prototype, Array.prototype);
+  CSSRuleList.prototype.item = function (i) { return i >= 0 && i < this.length ? this[i] : null; };
+  g.CSSRuleList = CSSRuleList;
+  var asRuleList = function (rules) { return Object.setPrototypeOf(rules, CSSRuleList.prototype); };
+  var CSSGroupingRule = ruleClass("CSSGroupingRule");
+  var CSSConditionRule = ruleClass("CSSConditionRule", CSSGroupingRule);
+  ruleClass("CSSMediaRule", CSSConditionRule);
+  ruleClass("CSSSupportsRule", CSSConditionRule);
+  ruleClass("CSSContainerRule", CSSConditionRule);
+  ruleClass("CSSLayerBlockRule", CSSGroupingRule);
+  ruleClass("CSSScopeRule", CSSGroupingRule);
+  ruleClass("CSSImportRule");
+  ruleClass("CSSFontFaceRule");
+  ruleClass("CSSPageRule");
+  ruleClass("CSSKeyframesRule");
+  ruleClass("CSSKeyframeRule");
+  ruleClass("CSSNamespaceRule");
+  ruleClass("CSSCounterStyleRule");
+  ruleClass("CSSLayerStatementRule");
+  ruleClass("CSSNestedDeclarations");
+  Object.setPrototypeOf(CSSStyleRule.prototype, CSSRule.prototype);
+  Object.setPrototypeOf(CSSStyleRule, CSSRule);
+  // CSSStyleProperties: a rule's declaration block — a CSSStyleDeclaration with its own store
+  var CSSStyleProperties = function CSSStyleProperties() { throw new TypeError("Illegal constructor"); };
+  Object.setPrototypeOf(CSSStyleProperties.prototype, Computed.prototype);
+  Object.setPrototypeOf(CSSStyleProperties, Computed);
+  g.CSSStyleProperties = CSSStyleProperties;
+  var declBlock = function (decls) {
+    var style = Object.create(CSSStyleProperties.prototype);
+    var items = decls.map(function (d) { return [d[0], d[1], !!d[2]]; });
+    var find = function (n) { return items.find(function (x) { return x[0] === String(n); }); };
+    var sync = function () { items.forEach(function (d) { style[d[0]] = d[1]; style[camel(d[0])] = d[1]; }); };
+    Object.defineProperties(style, {
+      getPropertyValue: { value: function (n) { var d = find(n); return d ? d[1] : ""; } },
+      getPropertyPriority: { value: function (n) { var d = find(n); return d && d[2] ? "important" : ""; } },
+      setProperty: { value: function (n, v, prio) {
+        n = String(n); v = String(v === undefined ? "" : v);
+        var d = find(n);
+        if (v === "") { if (d) items.splice(items.indexOf(d), 1); }
+        else if (d) { d[1] = v; d[2] = prio === "important"; }
+        else items.push([n, v, prio === "important"]);
+        sync();
+      } },
+      removeProperty: { value: function (n) { var old = style.getPropertyValue(n); var d = find(n); if (d) items.splice(items.indexOf(d), 1); return old; } },
+      item: { value: function (i) { return items[i] ? items[i][0] : ""; } },
+      length: { get: function () { return items.length; } },
+      cssText: {
+        get: function () { return items.map(function (d) { return d[0] + ": " + d[1] + (d[2] ? " !important" : "") + ";"; }).join(" "); },
+        set: function (v) { items = parseDeclarations(String(v)).map(function (d) { return [d[0], d[1], !!d[2]]; }); sync(); },
+      },
+    });
+    sync();
+    return style;
+  };
+  var makeRule = function (proto, type, cssText, parentRule, extra) {
+    var r = Object.create(proto);
+    var props = {
+      type: { value: type, enumerable: true },
+      cssText: { value: cssText, enumerable: true },
+      parentRule: { value: parentRule || null, enumerable: true },
+    };
+    if (extra) for (var k in extra) props[k] = extra[k];
+    Object.defineProperties(r, props);
+    return r;
+  };
+  var emptySheet = function () {
+    var s = { type: "text/css", href: null, ownerNode: null, parentStyleSheet: null, title: null, media: makeMediaList(""), disabled: false, cssRules: asRuleList([]), rules: asRuleList([]) };
+    if (g.CSSStyleSheet) Object.setPrototypeOf(s, g.CSSStyleSheet.prototype);
+    return s;
+  };
+  var stampSheet = function (rules, sheet) {
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (r.parentStyleSheet !== sheet) r.parentStyleSheet = sheet;
+      if (r.cssRules) stampSheet(r.cssRules, sheet);
+    }
+  };
+  var parseSheetFlat = function (text, parentRule) {
+    return asRuleList(splitRules(stripComments(text)).map(function (rule) {
+      var open = findTop(rule, 0, "{");
+      var prelude = (open < 0 ? rule : rule.slice(0, open)).trim();
+      var block = open < 0 ? "" : rule.slice(open + 1, rule.length - 1);
+      if (prelude.charAt(0) !== "@") {
+        return makeRule(CSSStyleRule.prototype, 1, rule, parentRule, {
+          selectorText: { value: prelude, enumerable: true },
+          style: { value: declBlock(parseDeclarations(block)), enumerable: true },
+        });
+      }
+      var m = /^@([\w-]+)\s*([\s\S]*)$/.exec(prelude.replace(/;\s*$/, ""));
+      var kw = m[1].toLowerCase(), rest = (m[2] || "").trim();
+      var grouped = function (proto, type, extra) {
+        var r = makeRule(proto, type, rule, parentRule, extra || {});
+        Object.defineProperties(r, { cssRules: { value: parseSheetFlat(block, r), enumerable: true } });
+        return r;
+      };
+      switch (kw) {
+        case "media": return grouped(g.CSSMediaRule.prototype, 4, { conditionText: { value: rest, enumerable: true }, media: { value: makeMediaList(rest), enumerable: true } });
+        case "supports": return grouped(g.CSSSupportsRule.prototype, 12, { conditionText: { value: rest, enumerable: true } });
+        case "container": return grouped(g.CSSContainerRule.prototype, 0, { conditionText: { value: rest, enumerable: true } });
+        case "layer":
+          if (open < 0) return makeRule(g.CSSLayerStatementRule.prototype, 0, rule, parentRule, { nameList: { value: rest ? rest.split(",").map(function (s) { return s.trim(); }) : [], enumerable: true } });
+          return grouped(g.CSSLayerBlockRule.prototype, 0, { name: { value: rest, enumerable: true } });
+        case "scope": return grouped(g.CSSScopeRule.prototype, 0, {});
+        case "import": {
+          var hm = /url\(\s*["']?([^"')]+)["']?\s*\)|^["']([^"']+)["']/.exec(rest);
+          return makeRule(g.CSSImportRule.prototype, 3, rule, parentRule, {
+            href: { value: hm ? (hm[1] !== undefined ? hm[1] : hm[2]) : "", enumerable: true },
+            media: { value: makeMediaList(hm ? rest.slice(hm[0].length).trim() : ""), enumerable: true },
+            styleSheet: { value: emptySheet(), enumerable: true },
+          });
+        }
+        case "font-face": return makeRule(g.CSSFontFaceRule.prototype, 5, rule, parentRule, { style: { value: declBlock(parseDeclarations(block)), enumerable: true } });
+        case "page": return makeRule(g.CSSPageRule.prototype, 6, rule, parentRule, {
+          selectorText: { value: rest, enumerable: true },
+          style: { value: declBlock(parseDeclarations(block)), enumerable: true },
+        });
+        case "counter-style": return makeRule(g.CSSCounterStyleRule.prototype, 11, rule, parentRule, {
+          name: { value: rest, enumerable: true },
+          style: { value: declBlock(parseDeclarations(block)), enumerable: true },
+        });
+        case "namespace": {
+          var nm = /^(?:(\S+)\s+)?(?:url\(\s*["']?([^"')]+)["']?\s*\)|["']([^"']+)["'])/.exec(rest);
+          return makeRule(g.CSSNamespaceRule.prototype, 10, rule, parentRule, {
+            prefix: { value: nm && nm[1] ? nm[1] : "", enumerable: true },
+            namespaceURI: { value: nm ? (nm[2] !== undefined ? nm[2] : nm[3]) : "", enumerable: true },
+          });
+        }
+        default: {
+          if (/(^|-)keyframes$/.test(kw)) {
+            var kr = makeRule(g.CSSKeyframesRule.prototype, 7, rule, parentRule, { name: { value: rest.split(/\s+/)[0] || "", enumerable: true } });
+            var frames = splitRules(stripComments(block)).map(function (fr) {
+              var fo = findTop(fr, 0, "{");
+              var keyText = fr.slice(0, fo).trim().split(",").map(function (s) { s = s.trim(); return s === "from" ? "0%" : s === "to" ? "100%" : s; }).join(", ");
+              return makeRule(g.CSSKeyframeRule.prototype, 8, fr, kr, {
+                keyText: { value: keyText, enumerable: true },
+                style: { value: declBlock(parseDeclarations(fr.slice(fo + 1, fr.length - 1))), enumerable: true },
+              });
+            });
+            Object.defineProperties(kr, { cssRules: { value: asRuleList(frames), enumerable: true } });
+            return kr;
+          }
+          return makeRule(CSSRule.prototype, 0, rule, parentRule, {});
+        }
+      }
+    }));
+  };
+  // constructable sheets (new CSSStyleSheet(), replaceSync, adoptedStyleSheets): adopted ones enter the cascade through
+  // documentRules, but they stay out of document.styleSheets and of the serialized page, as in a browser
+  if (!g.CSSStyleSheet) {
+    g.CSSStyleRule = CSSStyleRule;
+    g.CSSStyleSheet = class CSSStyleSheet {
+      constructor(opts) { this._text = ""; this._rev = 0; this.media = makeMediaList((opts && opts.media) || ""); this.disabled = !!(opts && opts.disabled); this.ownerNode = null; this.parentStyleSheet = null; this.href = null; this.type = "text/css"; this.title = null; }
+      get cssRules() { var r = parseSheetFlat(this._text); stampSheet(r, this); return r; }
+      get rules() { return this.cssRules; }
+      replaceSync(text) { this._text = String(text); this._rev++; }
+      replace(text) { this._text = String(text); this._rev++; return Promise.resolve(this); }
+      insertRule(rule, index) {
+        var list = splitRules(stripComments(this._text));
+        index = index === undefined ? 0 : index;
+        if (index < 0 || index > list.length) throw domErr("IndexSizeError", "Failed to execute 'insertRule' on 'CSSStyleSheet': the index " + index + " is greater than the length of the rule list.");
+        list.splice(index, 0, String(rule));
+        this._text = list.join("\n");
+        this._rev++;
+        return index;
+      }
+      deleteRule(index) {
+        var list = splitRules(stripComments(this._text));
+        if (index < 0 || index >= list.length) throw domErr("IndexSizeError", "Failed to execute 'deleteRule' on 'CSSStyleSheet': the index " + index + " is greater than the length of the rule list.");
+        list.splice(index, 1);
+        this._text = list.join("\n");
+        this._rev++;
+      }
+    };
+  }
+  var adoptTargets = [D.ctors && D.ctors.Document, D.ctors && D.ctors.ShadowRoot, g.ShadowRoot];
+  adoptTargets.forEach(function (c) {
+    var p = c && c.prototype;
+    if (!p || Object.getOwnPropertyDescriptor(p, "adoptedStyleSheets")) return;
+    Object.defineProperty(p, "adoptedStyleSheets", {
+      configurable: true,
+      get: function () { return this.__adopted || (this.__adopted = []); },
+      set: function (v) { this.__adopted = Array.prototype.slice.call(v); },
+    });
+  });
+  if (g.CSSStyleSheet) {
+    Object.setPrototypeOf(g.CSSStyleSheet.prototype, StyleSheet.prototype);
+    Object.setPrototypeOf(g.CSSStyleSheet, StyleSheet);
+  }
+  var docProto = D.ctors && D.ctors.Document && D.ctors.Document.prototype;
+  if (docProto && !Object.getOwnPropertyDescriptor(docProto, "styleSheets")) {
+    Object.defineProperty(docProto, "styleSheets", { configurable: true, get: function () { return sheetsOf(this); } });
+  }
+  var styleProto = D.ctors && D.ctors.HTMLStyleElement && D.ctors.HTMLStyleElement.prototype;
+  if (styleProto && !Object.getOwnPropertyDescriptor(styleProto, "sheet")) {
+    Object.defineProperty(styleProto, "sheet", {
+      configurable: true,
+      get: function () {
+        var list = sheetsOf(this.ownerDocument);
+        for (var i = 0; i < list.length; i++) if (list[i].ownerNode === this) return list[i];
+        return null;
+      },
+    });
+  }
+})(globalThis);

@@ -1,6 +1,9 @@
 import type { HtmlToImageModule } from "./loader.js";
+import type { ImageResourceRecord } from "wasm-quickjs-dom";
 import { buildFullSatoruOptions } from "./encode-args.js";
-import { isImageInput } from "./input.js";
+import { renderMermaidInput, type MermaidInput } from "./mermaid.js";
+import { imageBytesFromUnknown, isImageInput, sniffImageFormat } from "./input.js";
+import { svgHasText, svgIntrinsicSize, svgPage } from "./svg-input.js";
 import {
   DIAGNOSTIC_CODES,
   LogLevel,
@@ -129,15 +132,25 @@ export interface LayoutBox {
 
 export interface HtmlToImageOptions extends RenderOptions {
   /**
-   * Run the page's scripts before rendering (Node only; `single` entry point and the CLI's `--js`).
-   * The page is loaded into jsdom (optional dependency `jsdom`), its scripts run, and the resulting
-   * DOM is rendered. `true` waits for `load` plus 1 s; pass `{ timeout, settleMs, waitFor }` to tune it.
-   * jsdom has no layout and is not a security sandbox: only use it with pages you trust.
+   * Render a Mermaid diagram instead of `value` / `url`: `{ source, theme, padding, ... }` (see `MermaidInput`). The image is sized to the
+   * diagram unless `width` is given; `format` defaults to `"svg"`. The other options (fonts, limits, logging, ...) apply as for a page.
    */
-  javascript?: boolean | import("./js-page.js").JavaScriptOptions;
+  mermaid?: MermaidInput;
+  /**
+   * Internal (used by `mermaid`): size the image to the `.mermaid` element of the page, plus this padding on each side, instead of
+   * `width`, which is then only the width the page is laid out at to load its fonts. Instance pipeline only.
+   */
+  fitContent?: number;
+  /**
+   * Run the page's scripts before rendering (`single` entry point and the CLI's `--js`).
+   * The page's scripts run in QuickJS on a native C DOM, and the resulting DOM is rendered.
+   * `true` waits for `load` plus 1 s; pass `{ timeout, settleMs, waitFor, limits, skip }` to tune it.
+   * The engine is an interpreter and not a security sandbox: only use it with pages you trust.
+   */
+  javascript?: boolean | import("./js-apply.js").JavaScriptOptions;
   /** Encode quality 0-100 (encode stage only, default 85; ignored for svg/pdf). */
   quality?: number;
-  /** Encode speed 0-10 for AVIF, JXL and animated (lossy) WebP (encode stage only; default 8 for AVIF, 6 otherwise). Animated WebP uses libwebp method `8 - speed`: the default 6 is method 2, 5 is method 3 (Skia's, smaller by ~4%), 9 is method 0 (fastest, ~30% larger). */
+  /** Encode speed 0-10 for AVIF, JXL, PNG and animated (lossy) WebP (encode stage only; default 8 for AVIF, 6 otherwise). PNG uses zlib level `12 - speed` (6 and below: level 6 or 7; 9 is level 3, about 20% faster on a large page for ~15% larger files; 10 is level 2). Animated WebP uses libwebp method `8 - speed`: the default 6 is method 2, 5 is method 3 (Skia's, smaller by ~4%), 9 is method 0 (fastest, ~30% larger). */
   speed?: number;
   /**
    * Animation handling.
@@ -199,6 +212,19 @@ export interface HtmlToImageOptions extends RenderOptions {
    * walk produces the same keys. Inline boxes are omitted except replaced ones (img, svg, ...).
    */
   onLayout?: (boxes: LayoutBox[]) => void;
+  /**
+   * With `onLayout`: also report inline elements (`span`, `a`, ... in a line of text), each as the box enclosing all its
+   * line fragments. Off by default, since a reference browser's walk skips them. `measureLayout()` turns it on.
+   */
+  layoutInline?: boolean;
+  /**
+   * Called as the renderer's resource pass changes an image's state: `"loading"` before its fetch, then
+   * `"loaded"` (the engine has the bytes) or `"error"`. It is how a live QuickJS page learns the real
+   * timing (`QuickJSDOM.setImageResource`); the renderer fetches the URL once and the page never fetches
+   * it again, so `img` load/error events and `decode()` follow this one request. `measureLayout()` wires
+   * it for you.
+   */
+  onImageResource?: (url: string, record: ImageResourceRecord) => void;
   /**
    * Override hook for resource resolution, applied to every fetch path
    * (discovery fetches, fallback-font URLs, HTML `url` fetch). Return
@@ -267,6 +293,8 @@ export interface HtmlToImageOptions extends RenderOptions {
   pdfHeader?: string;
   /** PDF footer HTML template. */
   pdfFooter?: string;
+  /** Number of leading PDF pages printed without header and footer (a cover, a contents page). Defaults to 0. */
+  pdfSkipRunning?: number;
   /** Extra keys are forwarded to the WASM render options object. */
   [key: string]: unknown;
 }
@@ -315,12 +343,33 @@ export async function htmlToImage(
   module: HtmlToImageModule,
   options: HtmlToImageOptions,
 ): Promise<RenderResult<Uint8Array | string>> {
+  if (options.mermaid) return renderMermaidInput((o) => htmlToImage(module, o), { ...options, mermaid: options.mermaid });
   const orch = createOrchestration(module, options);
   const { format, width, emitLog, logged, loggedBinding } = orch;
   emitLog(LogLevel.Info, `render start: format=${format} width=${width}`);
 
   // ---- Image input: skip rendering, straight to converter_* ----
   if (isImageInput(options.value)) {
+    // An SVG with text goes through the page pipeline first: the converter has no fonts to draw it with.
+    if (format !== "none") {
+      const bytes = imageBytesFromUnknown(options.value);
+      const text = sniffImageFormat(bytes) === "svg" ? new TextDecoder().decode(bytes) : "";
+      if (text && svgHasText(text)) {
+        const size = svgIntrinsicSize(text);
+        const drawn = await htmlToImage(module, {
+          ...options,
+          value: svgPage(bytes, size),
+          width: Math.ceil(size.width),
+          height: Math.ceil(size.height),
+          format: "png",
+          crop: undefined,
+          fit: undefined,
+          scale: undefined,
+        });
+        const out = await htmlToImage(module, { ...options, value: drawn.data as Uint8Array });
+        return { ...out, originalFormat: "svg" };
+      }
+    }
     return runImageInput(module, options.value, orch);
   }
 
@@ -351,6 +400,7 @@ export async function htmlToImage(
     pdfMargin: orch.pdfMargin,
     pdfHeader: orch.pdfHeader,
     pdfFooter: orch.pdfFooter,
+    pdfSkipRunning: orch.pdfSkipRunning,
   });
 
   const inst = await tryRunHtmlInstance(

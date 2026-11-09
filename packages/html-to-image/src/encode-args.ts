@@ -65,6 +65,7 @@ export interface FullSatoruOptionsInput {
   pdfMargin?: { top?: number; right?: number; bottom?: number; left?: number };
   pdfHeader?: string;
   pdfFooter?: string;
+  pdfSkipRunning?: number;
 }
 
 /**
@@ -88,6 +89,7 @@ export function buildFullSatoruOptions(
     pdfMargin,
     pdfHeader,
     pdfFooter,
+    pdfSkipRunning,
   } = input;
   return {
     ...buildSatoruOptions(input.crop, input.fit),
@@ -110,6 +112,7 @@ export function buildFullSatoruOptions(
     pdfMarginLeft: pdfMargin?.left ?? 0,
     pdfHeader: pdfHeader ?? "",
     pdfFooter: pdfFooter ?? "",
+    ...(pdfSkipRunning ? { pdfSkipRunning: Math.max(0, Math.floor(pdfSkipRunning)) } : {}),
   };
 }
 

@@ -86,6 +86,8 @@ tmp/
 # Cloudflare
 .wrangler
 .cloudflare/
+examples/cloudflare-screenshot/.dev.vars
+examples/cloudflare-prerender/.dev.vars
 
 # ===== PDF-only publish directory (packages/html-to-image/scripts/pack-pdf.mjs) =====
 publish-pdf/

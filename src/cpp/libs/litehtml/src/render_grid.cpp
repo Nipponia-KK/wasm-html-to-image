@@ -1246,9 +1246,43 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
         pixel_t measured = el->measure(cb, fmt_ctx);
         const css_length& ih = el->src_el()->css().get_height();
         const bool pct_h = ih.units() == css_units_percentage || (ih.is_calc() && ih.calc_percent() != 0);
-        if (pct_h && (cb.height.type == containing_block_context::cbc_value_type_auto || cb.height_cyclic))
+        // A stretched item with an auto height is also measured against the row
+        // height below: its height IS the row height, so a percentage height in
+        // its subtree (a height:100% flex inside a plain wrapper div) resolves
+        // against it instead of staying cyclic -- the wrapper contributes the
+        // resolved content (an image transferred to 52 wide at the 30px row
+        // height), not the percentage-as-auto content (24).
+        // The basis only matters when something in the subtree can resolve
+        // against the item's height; without a percentage-height descendant
+        // the pinned re-measure below would change nothing but the item's own
+        // measured height, which must not leak into the row sizing (an empty
+        // stretched item in a definite-height grid lost its height that way).
+        std::function<bool(const std::shared_ptr<element>&)> has_pct_h =
+            [&](const std::shared_ptr<element>& elm) -> bool {
+                for (const auto& child : elm->children())
+                {
+                    if (child->css().get_height().units() == css_units_percentage) return true;
+                    if (has_pct_h(child)) return true;
+                }
+                return false;
+            };
+        bool stretch_auto_h = false;
+        if (!pct_h && ih.is_predefined() && ih.predef() == 0 && !el->src_el()->is_replaced() && has_pct_h(el->src_el()))
         {
-            pixel_t basis = el->height() - el->get_margins().height();
+            flex_align_items aln = el->src_el()->css().get_align_self();
+            if (aln == flex_align_items_auto) aln = css().get_flex_align_items();
+            stretch_auto_h = ((aln & 0xFF) == flex_align_items_stretch || (aln & 0xFF) == flex_align_items_normal);
+        }
+        if ((pct_h || stretch_auto_h) && (cb.height.type == containing_block_context::cbc_value_type_auto || cb.height_cyclic))
+        {
+            // A percentage height resolves against the grid AREA, and the
+            // area spans the item's margin box: when this item is the row's
+            // tallest, the row (and so the area) is its margin-box height,
+            // not its border-box height. A height:80% wrapping column flex
+            // with 12px margins resolves against 116, not 92, and stays in
+            // one column. The stretched item's pin below is its own height,
+            // which stays border-box.
+            pixel_t basis = pct_h ? el->height() : el->height() - el->get_margins().height();
             // The percentage resolves against the grid AREA, whose height is the
             // row's height -- and the row is at least its definite track minimum
             // (a fixed length, or a minmax() floor) and at least the content
@@ -1293,7 +1327,8 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                         mcb.render_height = mcb.height;
                         mcb.height_cyclic = true;
                         mate.el->measure(mcb, fmt_ctx);
-                        row_h = std::max(row_h, mate.el->height() - mate.el->get_margins().height());
+                        row_h = std::max(row_h, pct_h ? mate.el->height()
+                                                      : mate.el->height() - mate.el->get_margins().height());
                     }
                     row_total += row_h;
                     if (r > item.pos.row_start) row_total += m_grid_layout.row_gap;
@@ -1307,6 +1342,12 @@ void litehtml::render_item_grid::calculate_grid_layout(const containing_block_co
                 cb2.height = cb2.render_height;
                 cb2.height_cyclic = false;
                 cb2.size_mode &= ~containing_block_context::size_mode_cyclic_height;
+                // For the stretched auto-height item, pin the height itself: that
+                // is what makes the height definite for the percentage chain in
+                // its subtree (an auto height property leaves the type auto
+                // however the value is set). A percentage-height item must NOT
+                // get the pin -- its own percentage applies to the basis.
+                if (!pct_h) cb2.size_mode |= containing_block_context::size_mode_exact_height;
                 measured = el->measure(cb2, fmt_ctx);
             }
         }

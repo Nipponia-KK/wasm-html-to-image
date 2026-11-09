@@ -23,6 +23,8 @@ Runs seamlessly across **Node.js**, **Cloudflare Workers**, **Edge runtimes**, *
 | 📑 **Multi-Page Vector PDF** | Generate crisp, selectable vector PDFs from HTML or images | PDF |
 | 🖼️ **Image Resizing & Optimization** | Fast format conversion, crop, and resize (Sharp alternative) | WebP, AVIF, JXL, PNG, JPEG |
 | 🎬 **CSS Animation to WebP / GIF** | Record CSS `@keyframes` animations into animated images | Animated WebP, APNG, GIF |
+| 📝 **Markdown to PDF** | GitHub-flavoured Markdown to a styled, paged PDF: 11 templates, cover, contents, bookmarks, maths, syntax highlighting, call-outs, footnotes | PDF, PNG, WebP |
+| 🧜 **Mermaid Diagrams** | 33 diagram types drawn by the engine itself as vectors (no browser, no Mermaid JS): in Markdown, in HTML, or alone with `renderMermaid()` | SVG, PNG, WebP, JPEG, AVIF, JXL, PDF |
 | 🪶 **ThumbHash Blur Placeholder** | Generate compact blur placeholders for instant progressive loading | ThumbHash |
 
 

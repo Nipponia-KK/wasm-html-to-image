@@ -162,6 +162,7 @@ const result = await htmlToImage(mod, {
 | `wasm-html-to-image/preact`     | Preact 連携                | Preact JSX ノードを直接描画するラッパー                                                   |
 | `wasm-html-to-image/tailwind`   | スタイリング               | UnoCSS / Tailwind v4 のユーティリティ CSS を生成（`tw` prop、`@theme`、`@apply`）                                             |
 | `wasm-html-to-image/markdown`   | Markdown 入力              | GitHub 形式 Markdown を装飾済み HTML / PDF 用ドキュメントに変換（`markdownToHtml`, `markdownToDocument`, テンプレート対応） |
+| `wasm-html-to-image/single`、`/workers` | Mermaid の図 | `renderMermaid(source, options)` で、図だけを SVG や画像として取得（33 種類の図、テーマ、入力の補正） |
 | `wasm-html-to-image/markdown-math` | 数式描画                | Markdown 内の数式（`$…$`, `$$…$$`）を KaTeX でレンダリング（`katexMath`） |
 
 ---
@@ -169,9 +170,9 @@ const result = await htmlToImage(mod, {
 ## プロジェクト構成
 
 - **`packages/html-to-image`**: 公開 npm パッケージ。TypeScript ファサード、各ランタイム対応、CLI、Worker プール。
-- **`packages/cloudflare-ogp`**: Cloudflare Workers で OGP 画像生成を行うサンプルプロジェクト。
-- **`packages/deno-ogp`**: Deno Deploy での利用サンプル。
-- **`packages/playground`**: ブラウザ上で動作する Web Playground。HTML → 画像 / PDF、画像の最適化、Markdown → PDF（`?mode=markdown`。テンプレート、テーマ、表紙・目次・しおり、数式を、その場で切り替えて PDF を確認できる）の 3 つのモード。
+- **`examples/cloudflare-ogp`**: Cloudflare Workers で OGP 画像生成を行うサンプルプロジェクト。
+- **`examples/deno-ogp`**: Deno Deploy での利用サンプル。
+- **`packages/playground`**: ブラウザ上で動作する Web Playground。HTML → 画像 / PDF、画像の最適化、Markdown → PDF（`?mode=markdown`。テンプレート、テーマ、表紙・目次・しおり、数式を、その場で切り替えて PDF を確認できる）、Mermaid（`?mode=mermaid`。全図種のサンプル、テーマ、入力の補正、出力形式を切り替え、ギャラリーで一覧できる）の 4 つのモード。
 - **`packages/visual-test`**: 視覚回帰テストスイート。
 - **`src/cpp`**: C++ / Skia / litehtml コアエンジンおよび Emscripten バインディング。
 

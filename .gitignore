@@ -82,6 +82,8 @@ tmp/
 .omo/
 .slim/
 .omc/
+.serena/
+.claude/.headroom_wrap_marker.json
 
 # Cloudflare
 .wrangler
